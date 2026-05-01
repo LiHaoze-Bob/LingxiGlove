@@ -165,8 +165,7 @@ bool initSensors() {
         return false;
     }
     if (whoami != 0x68) {
-        DEBUG_PRINT("[Sensor] MPU6050 ID 异常: 0x");
-        DEBUG_PRINTLN(whoami, HEX);
+        DEBUG_LOG("[Sensor] MPU6050 ID 异常: 0x%X", (uint32_t)whoami);
         // 某些兼容模块返回0x72或其他值，继续尝试
     }
 
@@ -275,27 +274,14 @@ void printSensorData(const SensorData& data) {
         return;
     }
 
-    DEBUG_PRINT("[Sensor] Accel(g): ");
-    DEBUG_PRINT(data.accelX, 2); DEBUG_PRINT(", ");
-    DEBUG_PRINT(data.accelY, 2); DEBUG_PRINT(", ");
-    DEBUG_PRINT(data.accelZ, 2);
-
-    DEBUG_PRINT(" | Gyro(d/s): ");
-    DEBUG_PRINT(data.gyroX, 1); DEBUG_PRINT(", ");
-    DEBUG_PRINT(data.gyroY, 1); DEBUG_PRINT(", ");
-    DEBUG_PRINT(data.gyroZ, 1);
-
-    DEBUG_PRINT(" | Pitch: ");
-    DEBUG_PRINT(data.pitch, 1);
-    DEBUG_PRINT(" | Roll: ");
-    DEBUG_PRINT(data.roll, 1);
-
+    DEBUG_LOG("[Sensor] Accel(g): %.2f, %.2f, %.2f | Gyro(d/s): %.1f, %.1f, %.1f | Pitch: %.1f | Roll: %.1f",
+              (double)data.accelX, (double)data.accelY, (double)data.accelZ,
+              (double)data.gyroX,  (double)data.gyroY,  (double)data.gyroZ,
+              (double)data.pitch,  (double)data.roll);
     if (data.flexValid) {
-        DEBUG_PRINT(" | Flex: ");
+        // Flex 通道数量固定，逐通道打印便于调试（每通道单独一条日志）
         for (uint8_t ch = 0; ch < FLEX_CHANNEL_COUNT; ch++) {
-            DEBUG_PRINT(data.flexNorm[ch], 2);
-            if (ch < FLEX_CHANNEL_COUNT - 1) DEBUG_PRINT(",");
+            DEBUG_LOG("  Flex[%d]: %.2f", (int)ch, (double)data.flexNorm[ch]);
         }
     }
-    DEBUG_PRINTLN("");
 }

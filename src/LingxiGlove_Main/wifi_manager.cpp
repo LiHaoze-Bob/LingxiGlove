@@ -3,8 +3,7 @@
 
 bool connectWiFi(const char* ssid, const char* password, unsigned long timeoutMs) {
     DEBUG_PRINTLN("[WiFi] 开始连接WiFi...");
-    DEBUG_PRINT("[WiFi] SSID: ");
-    DEBUG_PRINTLN(ssid);
+    DEBUG_LOG("[WiFi] SSID: %s", ssid);
 
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, password);
@@ -16,10 +15,10 @@ bool connectWiFi(const char* ssid, const char* password, unsigned long timeoutMs
             return false;
         }
         delay(500);
-        DEBUG_PRINT(".");
+        Serial.print(".");  // 进度点，不加时间戳前缀，保持输出紧凑
     }
 
-    DEBUG_PRINTLN();
+    Serial.println();
     DEBUG_PRINTLN("[WiFi] 连接成功！");
     printWiFiInfo();
     return true;
@@ -41,9 +40,6 @@ void checkWiFiConnection(const char* ssid, const char* password) {
 }
 
 void printWiFiInfo() {
-    DEBUG_PRINT("[WiFi] IP地址: ");
-    DEBUG_PRINTLN(WiFi.localIP());
-    DEBUG_PRINT("[WiFi] 信号强度: ");
-    DEBUG_PRINT(WiFi.RSSI());
-    DEBUG_PRINTLN(" dBm");
+    DEBUG_LOG("[WiFi] IP地址: %s", WiFi.localIP().toString().c_str());
+    DEBUG_LOG("[WiFi] 信号强度: %d dBm", (int)WiFi.RSSI());
 }

@@ -179,8 +179,7 @@ static String chatQwen(const char* prompt) {
         DeserializationError err = deserializeJson(frame, json_str);
         if (err) {
             // 单帧解析失败不致命，继续读下一帧
-            DEBUG_PRINT("[LLM-SSE] 帧解析失败: ");
-            DEBUG_PRINTLN(err.c_str());
+            DEBUG_LOG("[LLM-SSE] 帧解析失败: %s", err.c_str());
             return true;
         }
 
@@ -205,8 +204,7 @@ static String chatQwen(const char* prompt) {
     int http_code = httpPostJsonSse(url, payload, auth_header.c_str(), on_line);
 
     if (http_code != 200) {
-        DEBUG_PRINT("[LLM-SSE] HTTP 错误码: ");
-        DEBUG_PRINTLN(http_code);
+        DEBUG_LOG("[LLM-SSE] HTTP 错误码: %d", http_code);
         return "[错误] 通义千问请求失败";
     }
 
@@ -215,8 +213,7 @@ static String chatQwen(const char* prompt) {
         return "[错误] 通义千问响应为空";
     }
 
-    DEBUG_PRINT("[LLM-SSE] 收到完整回复: ");
-    DEBUG_PRINTLN(accumulated);
+    DEBUG_LOG("[LLM-SSE] 收到完整回复: %s", accumulated.c_str());
     return accumulated;
 }
 
@@ -244,8 +241,7 @@ String chatLLM(const char* prompt) {
         return "[错误] 提示词为空";
     }
 
-    DEBUG_PRINT("[LLM] 用户输入: ");
-    DEBUG_PRINTLN(prompt);
+    DEBUG_LOG("[LLM] 用户输入: %s", prompt);
 
 #ifdef LLM_PROVIDER_BAIDU
     String reply = chatBaidu(prompt);
@@ -255,8 +251,7 @@ String chatLLM(const char* prompt) {
     String reply = "[错误] 未配置LLM提供商";
 #endif
 
-    DEBUG_PRINT("[LLM] 模型回复: ");
-    DEBUG_PRINTLN(reply);
+    DEBUG_LOG("[LLM] 模型回复: %s", reply.c_str());
     return reply;
 }
 
@@ -331,13 +326,11 @@ String rewriteGestureToSentence(const char* gesture_sequence) {
         return String();
     }
 
-    DEBUG_PRINT("[LLM改写] 手势序列: ");
-    DEBUG_PRINTLN(gesture_sequence);
+    DEBUG_LOG("[LLM改写] 手势序列: %s", gesture_sequence);
 
     String reply = chatLLM(prompt_buf);
     if (reply.length() == 0 || reply.startsWith("[错误]")) {
-        DEBUG_PRINT("[LLM改写] 失败，回落原词；reply=");
-        DEBUG_PRINTLN(reply);
+        DEBUG_LOG("[LLM改写] 失败，回落原词；reply=%s", reply.c_str());
         return String();
     }
 
@@ -349,15 +342,10 @@ String rewriteGestureToSentence(const char* gesture_sequence) {
         return String();
     }
     if (reply.length() > LLM_REWRITE_MAX_BYTES) {
-        DEBUG_PRINT("[LLM改写] 结果过长 (");
-        DEBUG_PRINT(reply.length());
-        DEBUG_PRINT("B > ");
-        DEBUG_PRINT(LLM_REWRITE_MAX_BYTES);
-        DEBUG_PRINTLN("B)，回落原词");
+        DEBUG_LOG("[LLM改写] 结果过长 (%dB > %uB)，回落原词", (int)reply.length(), (uint32_t)LLM_REWRITE_MAX_BYTES);
         return String();
     }
 
-    DEBUG_PRINT("[LLM改写] 改写结果: ");
-    DEBUG_PRINTLN(reply);
+    DEBUG_LOG("[LLM改写] 改写结果: %s", reply.c_str());
     return reply;
 }

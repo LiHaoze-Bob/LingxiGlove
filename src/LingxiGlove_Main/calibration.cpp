@@ -5,6 +5,7 @@
 
 #include "calibration.h"
 #include "sensor_manager.h"   // setImuBias / setFlexRuntimeRange 注入接口
+#include "config.h"           // DEBUG_PRINTLN / DEBUG_PRINT 宏定义
 
 #include <Arduino.h>
 #include <Preferences.h>
@@ -104,7 +105,7 @@ bool SaveCalibration(const CalibrationData& cal) {
     Preferences prefs;
     // readOnly = false
     if (!prefs.begin(kNvsNamespace, false)) {
-        Serial.println("[校准] NVS 打开失败 (写入模式)");
+        DEBUG_PRINTLN("[校准] NVS 打开失败 (写入模式)");
         return false;
     }
 
@@ -176,7 +177,7 @@ bool RunImuZeroingCalibration(CalibrationData* cal,
                               uint32_t sample_interval_ms) {
     if (!cal || !read_sample) return false;
     if (duration_ms < 500 || sample_interval_ms == 0) {
-        Serial.println("[校准] 参数不合法 (duration_ms<500 或 interval=0)");
+        DEBUG_PRINTLN("[校准] 参数不合法 (duration_ms<500 或 interval=0)");
         return false;
     }
 
@@ -200,7 +201,7 @@ bool RunImuZeroingCalibration(CalibrationData* cal,
         if (!read_sample(&ax, &ay, &az, &gx, &gy, &gz)) {
             n_fail++;
             if (n_fail >= 3 && n_ok == 0) {
-                Serial.println("[校准] 采样连续失败，中止");
+                DEBUG_PRINTLN("[校准] 采样连续失败，中止");
                 return false;
             }
             continue;
@@ -211,9 +212,7 @@ bool RunImuZeroingCalibration(CalibrationData* cal,
     }
 
     if (n_ok < 10) {
-        Serial.print("[校准] 有效采样数不足 (");
-        Serial.print(n_ok);
-        Serial.println(")，需 ≥10");
+        DEBUG_LOG("[校准] 有效采样数不足 (%d)，需 ≥10", n_ok);
         return false;
     }
 
@@ -227,10 +226,7 @@ bool RunImuZeroingCalibration(CalibrationData* cal,
     cal->gyro_bias_z  = (float)(sum_gz * inv_n);
     cal->flags |= CAL_FLAG_IMU_OK;
 
-    Serial.print("[校准] IMU 采样完成: n=");
-    Serial.print(n_ok);
-    Serial.print(", fail=");
-    Serial.println(n_fail);
+    DEBUG_LOG("[校准] IMU 采样完成: n=%d, fail=%d", n_ok, n_fail);
     return true;
 }
 
@@ -261,7 +257,7 @@ bool RunFlexStageCalibration(uint16_t out_values[FLEX_CHANNEL_COUNT],
         if (!read_flex_raw(raw)) {
             n_fail++;
             if (n_fail >= 3 && n_ok == 0) {
-                Serial.println("[校准] Flex 采样连续失败，中止");
+                DEBUG_PRINTLN("[校准] Flex 采样连续失败，中止");
                 return false;
             }
             continue;
@@ -273,7 +269,7 @@ bool RunFlexStageCalibration(uint16_t out_values[FLEX_CHANNEL_COUNT],
     }
 
     if (n_ok < 10) {
-        Serial.println("[校准] Flex 有效采样数不足 10");
+        DEBUG_PRINTLN("[校准] Flex 有效采样数不足 10");
         return false;
     }
 
@@ -285,33 +281,22 @@ bool RunFlexStageCalibration(uint16_t out_values[FLEX_CHANNEL_COUNT],
 #endif
 
 void PrintCalibration(const CalibrationData& cal) {
-    Serial.println("---- CalibrationData ----");
-    Serial.print("  flags = 0x");
-    Serial.println(cal.flags, HEX);
+    DEBUG_PRINTLN("---- CalibrationData ----");
+    DEBUG_LOG("  flags = 0x%X", (uint32_t)(cal.flags));
 
-    Serial.print("  IMU_OK = ");
-    Serial.println((cal.flags & CAL_FLAG_IMU_OK) ? "yes" : "no");
+    DEBUG_LOG("  IMU_OK = %s", (cal.flags & CAL_FLAG_IMU_OK) ? "yes" : "no");
     if (cal.flags & CAL_FLAG_IMU_OK) {
-        Serial.print("    accel_bias (g): ");
-        Serial.print(cal.accel_bias_x, 4); Serial.print(", ");
-        Serial.print(cal.accel_bias_y, 4); Serial.print(", ");
-        Serial.println(cal.accel_bias_z, 4);
-        Serial.print("    gyro_bias (deg/s): ");
-        Serial.print(cal.gyro_bias_x, 3); Serial.print(", ");
-        Serial.print(cal.gyro_bias_y, 3); Serial.print(", ");
-        Serial.println(cal.gyro_bias_z, 3);
+        DEBUG_LOG("    accel_bias (g): %.4f, %.4f, %.4f", (double)(cal.accel_bias_x), (double)(cal.accel_bias_y), (double)(cal.accel_bias_z));
+        DEBUG_LOG("    gyro_bias (deg/s): %.3f, %.3f, %.3f", (double)(cal.gyro_bias_x), (double)(cal.gyro_bias_y), (double)(cal.gyro_bias_z));
     }
 
 #if ENABLE_FLEX_SENSORS
-    Serial.print("  FLEX_OK = ");
-    Serial.println((cal.flags & CAL_FLAG_FLEX_OK) ? "yes" : "no");
+    DEBUG_LOG("  FLEX_OK = %s", (cal.flags & CAL_FLAG_FLEX_OK) ? "yes" : "no");
     if (cal.flags & CAL_FLAG_FLEX_OK) {
         for (uint8_t i = 0; i < FLEX_CHANNEL_COUNT; i++) {
-            Serial.print("    flex["); Serial.print(i);
-            Serial.print("] min=");   Serial.print(cal.flex_min[i]);
-            Serial.print(" max=");    Serial.println(cal.flex_max[i]);
+            DEBUG_LOG("    flex[%d] min=%u max=%u", (int)i, (uint32_t)cal.flex_min[i], (uint32_t)cal.flex_max[i]);
         }
     }
 #endif
-    Serial.println("-------------------------");
+    DEBUG_PRINTLN("-------------------------");
 }

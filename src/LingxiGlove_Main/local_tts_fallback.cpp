@@ -6,8 +6,9 @@
 #include "local_tts_fallback.h"
 #include "offline_voice_pcm.h"
 #include "tts_player.h"
+#include "config.h"    // DEBUG_PRINTLN / DEBUG_PRINT 宏定义
 
-#include <Arduino.h>   // 仅为 Serial 日志；PlayPcmInt16 已自带校验
+#include <Arduino.h>   // PlayPcmInt16 已自带校验
 
 #include <string.h>
 
@@ -17,7 +18,7 @@ size_t OfflineVoiceCount() {
 
 bool PlayOfflineVoice(const char* label) {
     if (!label || label[0] == '\0') {
-        Serial.println("[离线TTS] label 为空");
+        DEBUG_PRINTLN("[离线TTS] label 为空");
         return false;
     }
     if (kOfflinePcmCount == 0) {
@@ -30,15 +31,11 @@ bool PlayOfflineVoice(const char* label) {
         if (!e.label || !e.data) continue;  // 表项自身损坏时跳过
         if (strcmp(e.label, label) != 0) continue;
 
-        Serial.print("[离线TTS] 匹配 label='");
-        Serial.print(label);
-        Serial.print("' samples=");
-        Serial.print((uint32_t)e.sample_count);
-        Serial.print(" rate=");
-        Serial.println(e.sample_rate);
+        DEBUG_LOG("[离线TTS] 匹配 label='%s' samples=%u rate=%u",
+                  label, (uint32_t)e.sample_count, (uint32_t)e.sample_rate);
 
         if (!PlayPcmInt16(e.data, e.sample_count, e.sample_rate)) {
-            Serial.println("[离线TTS] I2S 播放失败");
+            DEBUG_PRINTLN("[离线TTS] I2S 播放失败");
             return false;
         }
         return true;
