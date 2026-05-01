@@ -11,6 +11,27 @@
 static bool s_i2sInitialized = false;
 
 // ----------------------------------------------------------------------
+// 工具函数：饱和软件增益
+// ----------------------------------------------------------------------
+// 对 uint8 缓冲区里的 int16 PCM 样本乘以 TTS_VOLUME_GAIN，使用饱和截幅
+// 防止乘法溢出导致波形翻转（会出现"嘶嘶"杂音）。
+// 要求缓冲区字节数为偶数（WAV / I2S 数据天然满足此条件）。
+static void ApplyGain(uint8_t* buf, size_t byte_count) {
+    // TTS_VOLUME_GAIN == 1.0 时此函数体为空，编译器会内联优化为无操作。
+    // 预处理器不支持浮点比较，所以不用 #if 条件，直接依赖编译器常量折叠。
+    const float gain = TTS_VOLUME_GAIN;
+    if (gain == 1.0f) return;  // 编译器对常量值会优化掉此分支
+    int16_t* samples = reinterpret_cast<int16_t*>(buf);
+    size_t sample_count = byte_count / sizeof(int16_t);
+    for (size_t i = 0; i < sample_count; ++i) {
+        float amplified = samples[i] * gain;
+        if (amplified >  32767.0f) amplified =  32767.0f;
+        if (amplified < -32768.0f) amplified = -32768.0f;
+        samples[i] = static_cast<int16_t>(amplified);
+    }
+}
+
+// ----------------------------------------------------------------------
 // 工具函数：标准 RIFF WAV 头解析
 // ----------------------------------------------------------------------
 // Qwen-TTS 返回的 audio.url 指向一个 .wav 文件。标准 PCM WAV 的前 44 字节
@@ -358,6 +379,8 @@ bool speak(const char* text) {
             // 比之前按 available 单包读效率更高、I2S 喂数据更连续。
             size_t got = stream->readBytes(s_download_buf, want);
             if (got > 0) {
+                // 软件增益：对 PCM 样本做饱和放大（gain=1.0 时被编译器优化为无操作）
+                ApplyGain(s_download_buf, got);
                 size_t bytes_written = 0;
                 i2s_write(I2S_NUM_0, s_download_buf, got, &bytes_written, portMAX_DELAY);
                 total_written += bytes_written;
@@ -446,14 +469,20 @@ bool PlayPcmInt16(const int16_t* pcm, size_t sample_count, uint32_t sample_rate)
     }
 
     // 分块写 I2S（一次写太大会阻塞任务切换；每块 512 样本 = 1024 字节对齐 DMA buf）
+    // PlayPcmInt16 接受 const int16_t*（通常来自 Flash 只读段），不能原地修改。
+    // 软件增益需要可写缓冲：把 chunk 拷贝到栈上临时缓冲再 ApplyGain，
+    // 512 样本 × 2 字节 = 1024 字节，在 8 KB loopTask 栈上安全。
     const size_t kChunkSamples = 512;
+    int16_t gain_buf[kChunkSamples];
     size_t written_samples = 0;
     while (written_samples < sample_count) {
         size_t chunk = sample_count - written_samples;
         if (chunk > kChunkSamples) chunk = kChunkSamples;
+        memcpy(gain_buf, pcm + written_samples, chunk * sizeof(int16_t));
+        ApplyGain(reinterpret_cast<uint8_t*>(gain_buf), chunk * sizeof(int16_t));
         size_t bytes_written = 0;
         esp_err_t err = i2s_write(I2S_NUM_0,
-                                  pcm + written_samples,
+                                  gain_buf,
                                   chunk * sizeof(int16_t),
                                   &bytes_written,
                                   portMAX_DELAY);
