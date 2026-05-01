@@ -1,0 +1,67 @@
+# ============================================================
+# LingxiGlove .gitignore
+# ============================================================
+
+# -------- 敏感信息（绝对不能提交） --------
+# 每位开发者需从 secrets.example.h 复制一份到 secrets.h 并填入真实值
+src/LingxiGlove_Main/secrets.h
+
+# -------- macOS 系统文件 --------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# -------- Windows 系统文件 --------
+Thumbs.db
+Desktop.ini
+
+# -------- Arduino IDE / arduino-cli 构建产物 --------
+build/
+*.bin
+*.elf
+*.hex
+*.map
+*.d
+*.o
+*.a
+# Arduino IDE 2.x 临时 sketch 备份目录
+.theia/
+.vscode/
+# Arduino IDE 编译缓存（有时出现在 sketch 目录里）
+**/cache/
+
+# -------- 本地单元测试编译产物 --------
+src/tests/**/build/
+src/tests/**/*.out
+src/tests/**/*.exe
+
+# -------- Python 工具链产物（tools/） --------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+*.wav
+# 允许提交 tools/ 下明确需要跟踪的 .wav 样例（若将来需要，可白名单）
+# !tools/sample_ok.wav
+
+# -------- 日志与临时文件 --------
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# -------- JetBrains / VSCode IDE --------
+.idea/
+.vscode/*
+!.vscode/settings.json.example
+
+# -------- 本地 Aone Copilot 记忆（可选：如果希望团队共享记忆，删掉这行） --------
+# .aone_copilot/
+
+# -------- Node / 前端产物（当前无，但预留） --------
+node_modules/
+dist/

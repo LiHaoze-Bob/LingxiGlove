@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>灵犀手套套 LingxiGlove — 技术架构图册</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: #f5f7fa;
+    color: #1a1a2e;
+    line-height: 1.6;
+    padding: 40px 20px;
+  }
+  .container {
+    max-width: 960px;
+    margin: 0 auto;
+  }
+  h1 {
+    text-align: center;
+    font-size: 28px;
+    margin-bottom: 8px;
+    color: #2F5496;
+  }
+  .subtitle {
+    text-align: center;
+    color: #666;
+    font-size: 14px;
+    margin-bottom: 40px;
+  }
+  .diagram-section {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    padding: 32px;
+    margin-bottom: 32px;
+  }
+  .diagram-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: #2F5496;
+    margin-bottom: 24px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid #e8ecf4;
+  }
+
+  /* 五层架构图 */
+  .arch-layer {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+  .layer-row {
+    display: flex;
+    align-items: stretch;
+    border-radius: 8px;
+    overflow: hidden;
+    min-height: 72px;
+  }
+  .layer-label {
+    width: 140px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 14px;
+    color: #fff;
+    flex-shrink: 0;
+    writing-mode: horizontal-tb;
+  }
+  .layer-content {
+    flex: 1;
+    display: flex;
+    gap: 12px;
+    padding: 14px 16px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .module-box {
+    background: #fff;
+    border-radius: 6px;
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    border-left: 4px solid transparent;
+    min-width: 110px;
+    text-align: center;
+  }
+  .module-box small {
+    display: block;
+    font-size: 11px;
+    color: #666;
+    font-weight: 400;
+    margin-top: 4px;
+  }
+
+  .layer-output { background: #E76F51; }
+  .layer-output .layer-content { background: #fdf2ef; }
+  .layer-output .module-box { border-left-color: #E76F51; }
+
+  .layer-cloud { background: #2F5496; }
+  .layer-cloud .layer-content { background: #eef2f9; }
+  .layer-cloud .module-box { border-left-color: #2F5496; }
+
+  .layer-comm { background: #52796F; }
+  .layer-comm .layer-content { background: #f0f5f3; }
+  .layer-comm .layer-label { font-size: 13px; }
+
+  .layer-edge { background: #E9C46A; color: #333; }
+  .layer-edge .layer-content { background: #fdf9ef; }
+  .layer-edge .layer-label { color: #333; }
+  .layer-edge .module-box { border-left-color: #E9C46A; }
+
+  .layer-sense { background: #264653; }
+  .layer-sense .layer-content { background: #eef3f5; }
+  .layer-sense .module-box { border-left-color: #264653; }
+
+  .arrow-down {
+    text-align: center;
+    font-size: 20px;
+    color: #bbb;
+    line-height: 1;
+    margin: 4px 0;
+  }
+
+  /* 双向流程 */
+  .bidirectional-flow {
+    display: flex;
+    gap: 20px;
+    margin-top: 24px;
+  }
+  .flow-column {
+    flex: 1;
+    background: #f8f9fb;
+    border-radius: 8px;
+    padding: 16px;
+    border: 1px solid #e8ecf4;
+  }
+  .flow-column h4 {
+    font-size: 14px;
+    color: #2F5496;
+    margin-bottom: 12px;
+    text-align: center;
+  }
+  .flow-step {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    background: #fff;
+    border-radius: 4px;
+    border-left: 3px solid #2F5496;
+  }
+  .flow-arrow {
+    text-align: center;
+    color: #999;
+    font-size: 16px;
+    margin: 4px 0;
+  }
+  .flow-actor {
+    text-align: center;
+    font-weight: 700;
+    font-size: 13px;
+    padding: 8px;
+    border-radius: 4px;
+    margin-bottom: 8px;
+  }
+  .actor-deaf { background: #e8f4fd; color: #2F5496; }
+  .actor-hearing { background: #fdf2ef; color: #E76F51; }
+
+  /* 数据流图 */
+  .dataflow {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  .df-box {
+    background: #fff;
+    border: 2px solid #2F5496;
+    border-radius: 8px;
+    padding: 14px;
+    text-align: center;
+    font-size: 13px;
+    font-weight: 600;
+    position: relative;
+  }
+  .df-box small {
+    display: block;
+    font-size: 11px;
+    font-weight: 400;
+    color: #666;
+    margin-top: 6px;
+  }
+  .df-box.sensor { border-color: #264653; background: #f4f8f9; }
+  .df-box.compute { border-color: #E9C46A; background: #fdf9ef; }
+  .df-box.output { border-color: #E76F51; background: #fdf2ef; }
+  .df-box.cloud { border-color: #2F5496; background: #eef2f9; }
+
+  .df-connector {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #888;
+    font-size: 12px;
+    margin: 6px 0;
+  }
+  .df-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    align-items: center;
+  }
+
+  /* CNN模型图 */
+  .cnn-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 16px 0;
+  }
+  .cnn-block {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+  .cnn-box {
+    border-radius: 6px;
+    padding: 14px 18px;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: center;
+    min-width: 100px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+  }
+  .cnn-input { background: #e8f4fd; border: 2px solid #2F5496; color: #2F5496; }
+  .cnn-conv { background: #fdf9ef; border: 2px solid #E9C46A; color: #8a6d1f; }
+  .cnn-pool { background: #f0f5f3; border: 2px solid #52796F; color: #52796F; }
+  .cnn-dense { background: #fdf2ef; border: 2px solid #E76F51; color: #c45a3a; }
+  .cnn-arrow {
+    font-size: 18px;
+    color: #bbb;
+  }
+  .cnn-dim {
+    font-size: 11px;
+    color: #888;
+    font-weight: 400;
+  }
+  .cnn-params {
+    font-size: 11px;
+    color: #999;
+    margin-top: 2px;
+  }
+
+  .note {
+    background: #f8f9fb;
+    border-left: 4px solid #2F5496;
+    padding: 12px 16px;
+    font-size: 13px;
+    color: #555;
+    margin-top: 20px;
+    border-radius: 0 6px 6px 0;
+  }
+
+  @media print {
+    body { background: #fff; padding: 20px; }
+    .diagram-section { box-shadow: none; border: 1px solid #ddd; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>灵犀手套套 LingxiGlove — 技术架构图册</h1>
+  <p class="subtitle">2026年全国大学生物联网设计竞赛 · 乐鑫科技命题赛道 · 浙江大学</p>
+
+  <!-- 图1：系统五层架构图 -->
+  <div class="diagram-section">
+    <div class="diagram-title">图1 系统五层架构图（含双向交流回路）</div>
+
+    <div class="arch-layer">
+      <div class="layer-row layer-output">
+        <div class="layer-label">输出层</div>
+        <div class="layer-content">
+          <div class="module-box">OLED 文字显示<small>128×64 I2C</small></div>
+          <div class="module-box">语音播报 TTS<small>MAX98357 + 喇叭</small></div>
+          <div class="module-box">振动反馈<small>PWM 马达</small></div>
+          <div class="module-box">屏幕文字 ASR<small>语音→文字显示</small></div>
+        </div>
+      </div>
+      <div class="arrow-down">▼</div>
+      <div class="layer-row layer-cloud">
+        <div class="layer-label">云端 AI 层</div>
+        <div class="layer-content">
+          <div class="module-box">通义千问 Qwen-Turbo<small>语义翻译 & 语序重组</small></div>
+          <div class="module-box">阿里云语音识别 ASR<small>语音→文字转换</small></div>
+        </div>
+      </div>
+      <div class="arrow-down">▼</div>
+      <div class="layer-row layer-comm">
+        <div class="layer-label">通信层</div>
+        <div class="layer-content">
+          <div class="module-box" style="border-left-color:#52796F;">ESP32-S3 WiFi 4<small>HTTP 1.1 / JSON API</small></div>
+        </div>
+      </div>
+      <div class="arrow-down">▼</div>
+      <div class="layer-row layer-edge">
+        <div class="layer-label">边缘 AI 层</div>
+        <div class="layer-content">
+          <div class="module-box">TinyML 1D CNN<small>Edge Impulse 手势推理</small></div>
+          <div class="module-box">音频采集编码<small>PCM 16kHz/16bit</small></div>
+          <div class="module-box">FreeRTOS 任务调度<small>多任务实时系统</small></div>
+        </div>
+      </div>
+      <div class="arrow-down">▼</div>
+      <div class="layer-row layer-sense">
+        <div class="layer-label">感知层</div>
+        <div class="layer-content">
+          <div class="module-box">5× 柔性弯曲传感器<small>2.2英寸 分压电路</small></div>
+          <div class="module-box">MPU6050 六轴 IMU<small>加速度 + 陀螺仪</small></div>
+          <div class="module-box">INMP441 I2S 麦克风<small>数字 MEMS 麦克风</small></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="bidirectional-flow">
+      <div class="flow-column">
+        <div class="flow-actor actor-deaf">聋人用户 → 健全人</div>
+        <div class="flow-step">👋 手势输入</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">📡 5弯曲 + IMU 采集</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">🧠 ESP32 CNN 推理</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">☁️ 云端 LLM 翻译</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">🔊 语音播报 + 文字显示</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-actor actor-hearing">健全人听到翻译</div>
+      </div>
+      <div class="flow-column">
+        <div class="flow-actor actor-hearing">健全人 → 聋人用户</div>
+        <div class="flow-step">🎤 语音输入</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">📡 INMP441 采集</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">🧠 ESP32 音频编码</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">☁️ 云端 ASR 识别</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">📺 OLED 文字显示</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-actor actor-deaf">聋人看到文字</div>
+      </div>
+    </div>
+
+    <div class="note">
+      <strong>架构亮点：</strong>采用"边缘感知 + 云端认知"的混合智能架构。端侧 TinyML 负责低延迟手势识别与音频采集，云端 LLM 与 ASR 负责高层次的语义理解与语音转写。双向交流闭环填补了现有手语辅助设备仅支持单向翻译的空白。
+    </div>
+  </div>
+
+  <!-- 图2：软件任务调度与数据流图 -->
+  <div class="diagram-section">
+    <div class="diagram-title">图2 嵌入式软件任务调度与数据流图</div>
+
+    <div class="df-row">
+      <div class="df-box sensor">
+        传感器采集任务
+        <small>优先级 3 | 周期 10ms</small>
+      </div>
+      <div class="df-box sensor">
+        音频采集任务
+        <small>优先级 3 | 事件触发</small>
+      </div>
+      <div class="df-box output">
+        输出驱动任务
+        <small>优先级 1 | 事件触发</small>
+      </div>
+      <div class="df-box cloud">
+        网络通信任务
+        <small>优先级 1 | 事件触发</small>
+      </div>
+    </div>
+
+    <div class="df-connector">▼ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ▼ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ▲ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ▲</div>
+
+    <div class="df-row">
+      <div class="df-box compute" style="grid-column: span 2;">
+        手势推理任务
+        <small>优先级 2 | 周期 100ms | 1D CNN 推理</small>
+      </div>
+      <div class="df-box compute" style="grid-column: span 2;">
+        语音识别任务
+        <small>优先级 2 | 事件触发 | HTTP 上传 ASR</small>
+      </div>
+    </div>
+
+    <div class="df-connector">▼ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ▼ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ▼ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ▼</div>
+
+    <div class="df-row">
+      <div class="df-box" style="grid-column: span 4; border-color:#2F5496; background:#eef2f9;">
+        FreeRTOS 任务调度器 + 消息队列 (Queue) + 环形缓冲区 (Ring Buffer)
+        <small>双核 ESP32-S3：Core 0 运行 WiFi/BT 协议栈 | Core 1 运行用户任务</small>
+      </div>
+    </div>
+
+    <div class="note">
+      <strong>调度策略：</strong>传感器采集任务与音频采集任务保持最高优先级，确保数据不丢失；手势推理与语音识别任务运行在第二优先级，利用 FreeRTOS 消息队列实现任务间解耦；网络通信与输出驱动为事件触发，仅在需要时唤醒，降低平均功耗。
+    </div>
+  </div>
+
+  <!-- 图3：CNN模型架构图 -->
+  <div class="diagram-section">
+    <div class="diagram-title">图3 Edge Impulse 1D CNN 模型架构图</div>
+
+    <div class="cnn-container">
+      <div class="cnn-block">
+        <div class="cnn-box cnn-input">
+          输入层
+          <div class="cnn-dim">(20, 11)</div>
+        </div>
+        <div class="cnn-params">时间窗口 × 特征数</div>
+      </div>
+      <div class="cnn-arrow">→</div>
+      <div class="cnn-block">
+        <div class="cnn-box cnn-conv">
+          Conv1D
+          <div class="cnn-dim">32 filters, k=3</div>
+        </div>
+        <div class="cnn-params">ReLU | ~1.1K params</div>
+      </div>
+      <div class="cnn-arrow">→</div>
+      <div class="cnn-block">
+        <div class="cnn-box cnn-conv">
+          Conv1D
+          <div class="cnn-dim">64 filters, k=3</div>
+        </div>
+        <div class="cnn-params">ReLU | ~6.2K params</div>
+      </div>
+      <div class="cnn-arrow">→</div>
+      <div class="cnn-block">
+        <div class="cnn-box cnn-pool">
+          GlobalAvgPool
+          <div class="cnn-dim">1D → 64</div>
+        </div>
+        <div class="cnn-params">降维 | 0 params</div>
+      </div>
+      <div class="cnn-arrow">→</div>
+      <div class="cnn-block">
+        <div class="cnn-box cnn-dense">
+          Dense
+          <div class="cnn-dim">32 neurons</div>
+        </div>
+        <div class="cnn-params">ReLU | ~2.1K params</div>
+      </div>
+      <div class="cnn-arrow">→</div>
+      <div class="cnn-block">
+        <div class="cnn-box cnn-dense">
+          Dropout
+          <div class="cnn-dim">rate = 0.3</div>
+        </div>
+        <div class="cnn-params">正则化 | 0 params</div>
+      </div>
+      <div class="cnn-arrow">→</div>
+      <div class="cnn-block">
+        <div class="cnn-box cnn-input" style="border-color:#264653; color:#264653; background:#f4f8f9;">
+          输出层
+          <div class="cnn-dim">10 classes</div>
+        </div>
+        <div class="cnn-params">Softmax | ~330 params</div>
+      </div>
+    </div>
+
+    <div class="note">
+      <strong>模型规格：</strong>总参数量约 12K，模型体积约 48KB（INT8 量化后约 12KB）。在 ESP32-S3 @ 240MHz 上单次推理延迟约 15ms，内存占用约 8KB。输入特征 11 维包括：5 路弯曲传感器归一化值 + 3 轴加速度 + 3 轴陀螺仪。时间窗口 20 帧覆盖 2 秒动态手势。
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

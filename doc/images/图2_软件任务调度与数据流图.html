@@ -1,0 +1,55 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; background: #fff; color: #1a1a2e; padding: 24px; }
+  .title { font-size: 16px; font-weight: 700; color: #2F5496; margin-bottom: 20px; padding-bottom: 8px; border-bottom: 2px solid #e8ecf4; }
+
+  .arch-layer { display: flex; flex-direction: column; gap: 6px; }
+  .layer-row { display: flex; border-radius: 6px; overflow: hidden; min-height: 60px; }
+  .layer-label { width: 120px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; color: #fff; flex-shrink: 0; }
+  .layer-content { flex: 1; display: flex; gap: 10px; padding: 10px 14px; align-items: center; flex-wrap: wrap; }
+  .module-box { background: #fff; border-radius: 5px; padding: 8px 12px; font-size: 12px; font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,0.08); border-left: 3px solid transparent; min-width: 100px; text-align: center; line-height: 1.5; }
+  .module-box small { font-size: 10px; color: #666; font-weight: 400; }
+  .layer-output { background: #E76F51; } .layer-output .layer-content { background: #fdf2ef; } .layer-output .module-box { border-left-color: #E76F51; }
+  .layer-cloud { background: #2F5496; } .layer-cloud .layer-content { background: #eef2f9; } .layer-cloud .module-box { border-left-color: #2F5496; }
+  .layer-comm { background: #52796F; } .layer-comm .layer-content { background: #f0f5f3; }
+  .layer-edge { background: #E9C46A; } .layer-edge .layer-content { background: #fdf9ef; } .layer-edge .module-box { border-left-color: #E9C46A; }
+  .layer-edge .layer-label { color: #333; }
+  .layer-sense { background: #264653; } .layer-sense .layer-content { background: #eef3f5; } .layer-sense .module-box { border-left-color: #264653; }
+
+  .flow-col { flex: 1; background: #f8f9fb; border-radius: 6px; padding: 12px; border: 1px solid #e8ecf4; }
+  .flow-actor { text-align: center; font-weight: 700; font-size: 12px; padding: 6px; border-radius: 4px; margin-bottom: 6px; }
+  .flow-step { font-size: 11px; padding: 5px 6px; margin-bottom: 4px; background: #fff; border-radius: 3px; border-left: 3px solid #2F5496; }
+
+  .df-box { border: 2px solid #2F5496; border-radius: 6px; padding: 10px; text-align: center; font-size: 12px; font-weight: 600; }
+  .df-box small { display: block; font-size: 10px; font-weight: 400; color: #666; margin-top: 4px; }
+  .df-box.sensor { border-color: #264653; background: #f4f8f9; }
+  .df-box.compute { border-color: #E9C46A; background: #fdf9ef; }
+  .df-box.output { border-color: #E76F51; background: #fdf2ef; }
+  .df-box.cloud { border-color: #2F5496; background: #eef2f9; }
+
+  .cnn-container { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; padding: 12px 0; }
+  .cnn-block { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .cnn-box { border-radius: 5px; padding: 10px 14px; font-size: 12px; font-weight: 600; text-align: center; min-width: 80px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); line-height: 1.5; }
+  .cnn-input { background: #e8f4fd; border: 2px solid #2F5496; color: #2F5496; }
+  .cnn-conv { background: #fdf9ef; border: 2px solid #E9C46A; color: #8a6d1f; }
+  .cnn-pool { background: #f0f5f3; border: 2px solid #52796F; color: #52796F; }
+  .cnn-dense { background: #fdf2ef; border: 2px solid #E76F51; color: #c45a3a; }
+  .cnn-arrow { font-size: 16px; color: #bbb; }
+  .cnn-dim { font-size: 10px; color: #888; font-weight: 400; }
+  .cnn-params { font-size: 10px; color: #999; }
+</style></head><body><div class="title">图2 嵌入式软件任务调度与数据流图</div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:16px;">
+        <div class="df-box sensor">传感器采集任务<br><small>优先级 3 | 周期 10ms</small></div>
+        <div class="df-box sensor">音频采集任务<br><small>优先级 3 | 事件触发</small></div>
+        <div class="df-box output">输出驱动任务<br><small>优先级 1 | 事件触发</small></div>
+        <div class="df-box cloud">网络通信任务<br><small>优先级 1 | 事件触发</small></div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-bottom:16px;">
+        <div class="df-box compute">手势推理任务<br><small>优先级 2 | 周期 100ms | 1D CNN 推理</small></div>
+        <div class="df-box compute">语音识别任务<br><small>优先级 2 | 事件触发 | HTTP 上传 ASR</small></div>
+      </div>
+      <div style="background:#eef2f9;border:2px solid #2F5496;border-radius:8px;padding:14px;text-align:center;font-size:14px;font-weight:600;">
+        FreeRTOS 任务调度器 + 消息队列 (Queue) + 环形缓冲区 (Ring Buffer)
+        <br><small>双核 ESP32-S3：Core 0 运行 WiFi/BT 协议栈 | Core 1 运行用户任务</small>
+      </div>
+    </body></html>

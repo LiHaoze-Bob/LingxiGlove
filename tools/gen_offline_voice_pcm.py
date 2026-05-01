@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+gen_offline_voice_pcm.py
+--------------------------------------------------------------------
+为 LingxiGlove 生成 `offline_voice_pcm.cpp`：调用百度 TTS 把给定 label
+列表合成为 16-bit / 16kHz / mono PCM，并写成 C++ 常量数组，供
+`local_tts_fallback.cpp` 在在线 TTS 失败时兜底播放。
+
+使用方式：
+    # 1) 设置百度 TTS 凭证
+    export BAIDU_TTS_API_KEY="your_api_key"
+    export BAIDU_TTS_SECRET_KEY="your_secret_key"
+
+    # 2) 运行脚本（label 列表可用默认的 5 个急救高频词，也可自定义）
+    python3 tools/gen_offline_voice_pcm.py
+    # 或：
+    python3 tools/gen_offline_voice_pcm.py --labels 你好 谢谢 再见 是 不
+
+脚本会：
+    - 对每个 label 调百度 TTS `tsn.baidu.com/text2audio` 以 aue=4 (pcm-16k)
+      下载 PCM 字节流
+    - 校验返回内容不是 JSON 错误、体积在 [2KB, 320KB] 之间
+    - 写入 `src/LingxiGlove_Main/offline_voice_pcm.cpp`，**仅覆盖该文件**，
+      不动 `.h`。每条记录按 int16 数组列出，末尾附 `kOfflinePcmTable[]` 与
+      `kOfflinePcmCount`。
+
+严禁行为：
+    - 不伪造任何 PCM 数据：TTS 下载失败则整条 label 跳过并记入报错摘要；
+      若最终成功条数为 0，脚本以非零退出码失败，绝不生成"假装能兜底"的空表
+"""
+
+import argparse
+import json
+import os
+import sys
+import struct
+import textwrap
+import urllib.parse
+import urllib.request
+from typing import List, Tuple
+
+# ------------------------------------------------------------------
+# 与 offline_voice_pcm.h 契约保持一致的常量
+# ------------------------------------------------------------------
+TARGET_SAMPLE_RATE = 16000            # 百度 TTS aue=4 返回 pcm-16k
+BYTES_PER_SAMPLE   = 2                # int16 mono
+MIN_PCM_BYTES      = 2000             # < ~62ms，很可能是接口错误吐的文本
+MAX_PCM_BYTES      = 320 * 1024       # 10 秒上限 (与 PlayPcmInt16 的内部限制一致)
+
+DEFAULT_LABELS = ["你好", "谢谢", "再见", "救命", "不"]
+
+OUTPUT_CPP_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__),
+                 "..", "src", "LingxiGlove_Main", "offline_voice_pcm.cpp"))
+
+
+def get_baidu_access_token(api_key: str, secret_key: str) -> str:
+    url = (
+        "https://aip.baidubce.com/oauth/2.0/token"
+        f"?grant_type=client_credentials&client_id={urllib.parse.quote(api_key)}"
+        f"&client_secret={urllib.parse.quote(secret_key)}"
+    )
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        body = resp.read().decode("utf-8")
+    data = json.loads(body)
+    token = data.get("access_token")
+    if not token:
+        raise RuntimeError(f"baidu token response missing access_token: {body}")
+    return token
+
+
+def fetch_tts_pcm(text: str, token: str) -> bytes:
+    params = {
+        "tex": text,
+        "tok": token,
+        "cuid": "signlingua_esp32_s3",
+        "ctp": "1",
+        "lan": "zh",
+        "spd": "5",
+        "pit": "5",
+        "vol": "15",
+        "per": "0",
+        "aue": "4",  # pcm-16k
+    }
+    url = "https://tsn.baidu.com/text2audio?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        ctype = resp.headers.get("Content-Type", "")
+        body = resp.read()
+
+    if "json" in ctype.lower():
+        raise RuntimeError(f"TTS API returned JSON error: {body.decode('utf-8', 'replace')}")
+    if len(body) < MIN_PCM_BYTES:
+        raise RuntimeError(
+            f"TTS PCM too small ({len(body)} bytes), likely an error payload")
+    if len(body) > MAX_PCM_BYTES:
+        raise RuntimeError(
+            f"TTS PCM too large ({len(body)} bytes > {MAX_PCM_BYTES}); "
+            "shorten the text or raise PlayPcmInt16 limit")
+    # 样本数必须是偶字节数
+    if len(body) % BYTES_PER_SAMPLE != 0:
+        raise RuntimeError(f"TTS PCM byte count not aligned to int16: {len(body)}")
+    return body
+
+
+def pcm_bytes_to_int16(pcm: bytes) -> List[int]:
+    # 小端序，与 ESP32 I2S 使用的 int16 LE 一致
+    n = len(pcm) // BYTES_PER_SAMPLE
+    return list(struct.unpack("<" + "h" * n, pcm))
+
+
+def sanitize_c_identifier(label: str, index: int) -> str:
+    # 把 label 转为可作为 C 变量名的后缀：仅保留 ASCII 字母数字，其余转下划线
+    cleaned = "".join(c if c.isalnum() else "_" for c in label.encode("ascii", "ignore").decode())
+    if not cleaned or not (cleaned[0].isalpha() or cleaned[0] == "_"):
+        cleaned = f"entry_{index}"
+    return f"kPcm_{index}_{cleaned}"[:48]
+
+
+def format_int16_array(samples: List[int], var_name: str, cols: int = 12) -> str:
+    """把 int16 样本写成 `static const int16_t var[] PROGMEM = { ... };` 的文本"""
+    lines = []
+    for i in range(0, len(samples), cols):
+        chunk = samples[i:i + cols]
+        lines.append("    " + ", ".join(f"{v: 6d}" for v in chunk) + ",")
+    # 末尾逗号 OK，C++ 允许
+    body = "\n".join(lines)
+    return (
+        f"static const int16_t {var_name}[] = {{\n"
+        f"{body}\n"
+        f"}};\n"
+        f"static const size_t {var_name}_count = sizeof({var_name}) / sizeof({var_name}[0]);\n"
+    )
+
+
+def render_cpp_file(entries: List[Tuple[str, str, int, int]]) -> str:
+    """entries: list of (label_utf8_literal, var_name, sample_count, sample_rate)"""
+    header = textwrap.dedent("""\
+        // ============================================================
+        // offline_voice_pcm.cpp  (auto-generated by tools/gen_offline_voice_pcm.py)
+        // ------------------------------------------------------------
+        // 该文件由脚本覆盖生成。修改源数据请重跑脚本而非手改本文件。
+        // 契约见 offline_voice_pcm.h。
+        // ============================================================
+
+        #include "offline_voice_pcm.h"
+        """)
+
+    arrays_blob = "\n".join(
+        f"// --- label: {label} ---\n{body}"
+        for (label, body) in entries_rendered(entries)
+    )
+
+    table_rows = []
+    for (label_lit, var_name, _count, rate) in entries:
+        table_rows.append(
+            f'    {{ "{label_lit}", {var_name}, {var_name}_count, {rate} }},'
+        )
+    table_body = "\n".join(table_rows)
+
+    table_blob = textwrap.dedent(f"""\
+
+        const OfflinePcmEntry kOfflinePcmTable[] = {{
+        {table_body}
+        }};
+
+        const size_t kOfflinePcmCount =
+            sizeof(kOfflinePcmTable) / sizeof(kOfflinePcmTable[0]);
+        """)
+
+    return header + "\n" + arrays_blob + table_blob
+
+
+def entries_rendered(entries):
+    # 为减少循环引用，array body 单独渲染出来传给 render_cpp_file
+    # 这里的约定：调用方提前把 "body"（整个静态数组定义）塞进 _cached_bodies
+    for e in entries:
+        yield (e[0], _cached_bodies[e[1]])
+
+
+_cached_bodies = {}  # var_name -> rendered body
+
+
+def escape_c_string(s: str) -> str:
+    # 把 UTF-8 字符串按字节转 \xHH，避开源文件编码问题
+    b = s.encode("utf-8")
+    return "".join(f"\\x{byte:02x}" for byte in b)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--labels", nargs="+", default=DEFAULT_LABELS,
+                        help=f"要合成的文本列表，默认 {DEFAULT_LABELS}")
+    parser.add_argument("--api-key", default=os.environ.get("BAIDU_TTS_API_KEY", ""),
+                        help="百度 API Key (默认读 BAIDU_TTS_API_KEY 环境变量)")
+    parser.add_argument("--secret-key", default=os.environ.get("BAIDU_TTS_SECRET_KEY", ""),
+                        help="百度 Secret Key (默认读 BAIDU_TTS_SECRET_KEY 环境变量)")
+    parser.add_argument("--output", default=OUTPUT_CPP_PATH,
+                        help="输出 .cpp 路径 (默认覆盖 src/LingxiGlove_Main/offline_voice_pcm.cpp)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="不写文件，仅打印渲染结果到 stdout")
+    args = parser.parse_args()
+
+    if not args.api_key or not args.secret_key:
+        print("ERROR: 需要设置 BAIDU_TTS_API_KEY / BAIDU_TTS_SECRET_KEY 或传 --api-key/--secret-key",
+              file=sys.stderr)
+        return 2
+
+    try:
+        token = get_baidu_access_token(args.api_key, args.secret_key)
+    except Exception as e:
+        print(f"ERROR: 获取 access_token 失败: {e}", file=sys.stderr)
+        return 3
+
+    entries: List[Tuple[str, str, int, int]] = []
+    errors = []
+
+    for idx, label in enumerate(args.labels):
+        try:
+            pcm_bytes = fetch_tts_pcm(label, token)
+        except Exception as e:
+            errors.append(f"  - label='{label}': {e}")
+            continue
+
+        samples = pcm_bytes_to_int16(pcm_bytes)
+        var_name = sanitize_c_identifier(label, idx)
+        _cached_bodies[var_name] = format_int16_array(samples, var_name)
+        entries.append((escape_c_string(label), var_name, len(samples), TARGET_SAMPLE_RATE))
+        print(f"  [OK] {label}: {len(samples)} samples "
+              f"(~{len(samples)/TARGET_SAMPLE_RATE:.2f}s)")
+
+    if not entries:
+        print("ERROR: 全部 label 合成失败，拒绝生成空表 (严禁伪造兜底数据)", file=sys.stderr)
+        if errors:
+            print("失败明细:", file=sys.stderr)
+            for e in errors:
+                print(e, file=sys.stderr)
+        return 4
+
+    cpp_text = render_cpp_file(entries)
+
+    if args.dry_run:
+        sys.stdout.write(cpp_text)
+        return 0
+
+    # 确保输出目录存在
+    out_dir = os.path.dirname(os.path.abspath(args.output))
+    if out_dir and not os.path.isdir(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+
+    with open(args.output, "w", encoding="utf-8") as f:
+        f.write(cpp_text)
+
+    print(f"[DONE] wrote {args.output} with {len(entries)} entries")
+    if errors:
+        print("部分 label 合成失败（已跳过）:", file=sys.stderr)
+        for e in errors:
+            print(e, file=sys.stderr)
+        # 允许部分成功，退出码 0；有部分失败时只提示
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
