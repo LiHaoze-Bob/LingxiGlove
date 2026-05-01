@@ -176,13 +176,37 @@
 // 设为 1 开启详细日志，设为 0 关闭
 #define DEBUG_MODE  1
 
-// 使用可变参数宏，兼容 DEBUG_PRINTLN(x) 和 DEBUG_PRINTLN(x, HEX) 两种调用形式
+// 日志宏说明：
+//   DEBUG_LOG(fmt, ...)  — 主日志接口。在行首自动附加 "[<millis>ms] " 时间戳，
+//                          使用 printf 格式化字符串，支持多参数拼接，输出带换行。
+//                          示例：DEBUG_LOG("[TTS] 请求合成: %s", text);
+//                                 DEBUG_LOG("[HTTP] 状态码: %d", code);
+//   DEBUG_PRINTLN(x)    — 兼容旧调用。等价于 DEBUG_LOG("%s", String(x).c_str())，
+//                          仅支持单参数（不支持多段拼接），用于纯字符串日志。
+//   DEBUG_PRINT(x)      — 无时间戳，无换行，仅用于 CSV 数据流等特殊场合（尽量避免）。
 #if DEBUG_MODE
-  #define DEBUG_PRINT(...)    Serial.print(__VA_ARGS__)
-  #define DEBUG_PRINTLN(...)  Serial.println(__VA_ARGS__)
+  // ets_printf 对含 UTF-8 中文字节的格式串存在截断风险（高位字节被误读为格式符），
+  // 且与 HardwareSerial 缓冲区是两路 UART 通道，混用会导致输出交织。
+  // 修复：用 snprintf 先把整行（时间戳+正文+\n）拼到栈缓冲区，
+  //       再一次性 Serial.write(buf, n) 输出——snprintf 对 UTF-8 字节透明，
+  //       Serial.write 是单次缓冲写，完全原子，不走 ets_printf。
+  #define DEBUG_LOG(fmt, ...)  do {                                              \
+      char _dbg_buf[256];                                                        \
+      int _dbg_n = snprintf(_dbg_buf, sizeof(_dbg_buf) - 1,                    \
+                            "[%lums] " fmt "\n",                                \
+                            (unsigned long)millis(), ##__VA_ARGS__);            \
+      if (_dbg_n > 0) {                                                         \
+          if (_dbg_n >= (int)sizeof(_dbg_buf)) _dbg_n = sizeof(_dbg_buf) - 1;  \
+          Serial.write((const uint8_t*)_dbg_buf, (size_t)_dbg_n);              \
+      }                                                                         \
+    } while (0)
+  #define DEBUG_PRINT(...)     Serial.print(__VA_ARGS__)
+  // DEBUG_PRINTLN 统一走 DEBUG_LOG，消除 Serial.print+Serial.println 混用
+  #define DEBUG_PRINTLN(msg)   DEBUG_LOG("%s", (msg))
 #else
-  #define DEBUG_PRINT(...)    ((void)0)
-  #define DEBUG_PRINTLN(...)  ((void)0)
+  #define DEBUG_LOG(fmt, ...)  ((void)0)
+  #define DEBUG_PRINT(...)     ((void)0)
+  #define DEBUG_PRINTLN(...)   ((void)0)
 #endif
 
 #endif // CONFIG_H
