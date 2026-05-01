@@ -157,12 +157,16 @@ static String chatQwen(const char* prompt) {
     bool finished = false;
 
     auto on_line = [&](const String& line) -> bool {
-        // SSE 格式：非 data: 开头的行（空行、注释）直接跳过
-        if (!line.startsWith("data: ")) {
+        // SSE 格式：非 data: 开头的行（id:N、event:result、:HTTP_STATUS/200 注释行、空行）跳过。
+        // 关键：DashScope 实际发送的是 "data:{...}"（冒号后无空格），
+        // 而 RFC 规范是 "data: {...}"（有空格）。只检查 "data:" 前缀以兼容两种格式。
+        if (!line.startsWith("data:")) {
             return true;  // 继续读
         }
 
-        const char* json_str = line.c_str() + 6;  // 跳过 "data: "
+        // 跳过 "data:" 前缀（5字节），再跳过可能存在的空格
+        const char* json_str = line.c_str() + 5;
+        while (*json_str == ' ') ++json_str;
 
         // 流结束标志
         if (strcmp(json_str, "[DONE]") == 0) {
