@@ -40,7 +40,9 @@ static bool IsHttpsUrl(const char* url) {
  */
 static bool BeginHttps(HTTPClient& http, WiFiClientSecure& secure_client, const char* url) {
     secure_client.setInsecure();
-    secure_client.setTimeout(kHttpTimeoutMs / 1000);  // WiFiClient::setTimeout 单位为秒
+    // WiFiClientSecure::setTimeout 单位为秒，控制 TLS 握手阶段的 TCP socket 超时。
+    // TLS 握手典型耗时 1-2s，设 5s 足够，不与 http.setTimeout（读取层）叠加到 30s。
+    secure_client.setTimeout(5);
     return http.begin(secure_client, url);
 }
 
@@ -60,8 +62,7 @@ String httpPostJson(const char* url, const String& jsonPayload, const char* auth
         begin_ok = http.begin(url);
     }
     if (!begin_ok) {
-        DEBUG_PRINT("[HTTP] begin 失败: ");
-        DEBUG_PRINTLN(url);
+        DEBUG_LOG("[HTTP] begin 失败: %s", url);
         return String();
     }
 
@@ -73,19 +74,16 @@ String httpPostJson(const char* url, const String& jsonPayload, const char* auth
         http.addHeader("Authorization", authHeader);
     }
 
-    DEBUG_PRINT("[HTTP] POST ");
-    DEBUG_PRINTLN(url);
+    DEBUG_LOG("[HTTP] POST %s", url);
 
     int httpCode = http.POST(jsonPayload);
     String response;
 
     if (httpCode > 0) {
-        DEBUG_PRINT("[HTTP] 状态码: ");
-        DEBUG_PRINTLN(httpCode);
+        DEBUG_LOG("[HTTP] 状态码: %d", httpCode);
         response = http.getString();
     } else {
-        DEBUG_PRINT("[HTTP] 请求失败, 错误: ");
-        DEBUG_PRINTLN(http.errorToString(httpCode));
+        DEBUG_LOG("[HTTP] 请求失败, 错误: %s", http.errorToString(httpCode).c_str());
     }
 
     http.end();
@@ -115,8 +113,7 @@ int httpPostJsonSse(const char* url,
         begin_ok = http.begin(url);
     }
     if (!begin_ok) {
-        DEBUG_PRINT("[HTTP-SSE] begin 失败: ");
-        DEBUG_PRINTLN(url);
+        DEBUG_LOG("[HTTP-SSE] begin 失败: %s", url);
         return -1;
     }
 
@@ -129,19 +126,16 @@ int httpPostJsonSse(const char* url,
         http.addHeader("Authorization", authHeader);
     }
 
-    DEBUG_PRINT("[HTTP-SSE] POST ");
-    DEBUG_PRINTLN(url);
+    DEBUG_LOG("[HTTP-SSE] POST %s", url);
 
     int http_code = http.POST(jsonPayload);
     if (http_code <= 0) {
-        DEBUG_PRINT("[HTTP-SSE] 请求失败: ");
-        DEBUG_PRINTLN(http.errorToString(http_code));
+        DEBUG_LOG("[HTTP-SSE] 请求失败: %s", http.errorToString(http_code).c_str());
         http.end();
         return http_code;
     }
 
-    DEBUG_PRINT("[HTTP-SSE] 状态码: ");
-    DEBUG_PRINTLN(http_code);
+    DEBUG_LOG("[HTTP-SSE] 状态码: %d", http_code);
 
     if (http_code != HTTP_CODE_OK) {
         // 非 200 时把错误体打印出来帮助调试（不超过 256 字节）
@@ -158,8 +152,7 @@ int httpPostJsonSse(const char* url,
                 }
             }
             err_buf[got] = '\0';
-            DEBUG_PRINT("[HTTP-SSE] 错误体: ");
-            DEBUG_PRINTLN(err_buf);
+            DEBUG_LOG("[HTTP-SSE] 错误体: %s", err_buf);
         }
         http.end();
         return http_code;
@@ -172,48 +165,84 @@ int httpPostJsonSse(const char* url,
         return -1;
     }
 
-    // 逐字节读取，以 '\n' 为行分隔符，组装完整行后交给 onLine 回调。
-    // 嵌入式场景下避免 String 在高频循环里动态扩容：使用固定栈缓冲区，
-    // 超长行（> 511 字节）截断处理（SSE data 行通常 < 300 字节）。
-    static char s_line_buf[512];
+    // 批量读取 SSE 流，以 '\n' 为行分隔符，组装完整行后交给 onLine 回调。
+    //
+    // 旧方案（逐字节）的问题：
+    //   每帧 base64 数据约 8000 字节，逐字节 read() 需要循环 8000 次；
+    //   每次 available()==0 就 delay(2)，导致实际读取速度比 WiFi 吞吐慢 10 倍以上。
+    //   实测：理论播放 0.76s 的 TTS 音频，实际耗时 9s（卡顿明显）。
+    //
+    // 新方案（批量读取）：
+    //   每轮循环一次性读入所有 available 字节到 s_batch_buf，
+    //   再用 memchr 扫 '\n' 分割行，消除了逐字节 delay 的瓶颈。
+    //   s_batch_buf 放 .bss 段（static），避免栈溢出。
+    static char s_line_buf[8192];   // 当前行的组装缓冲（最大单行长度）
+    static char s_batch_buf[2048];  // 每次 readBytes 的批量接收缓冲
     int line_len = 0;
     const unsigned long kReadTimeout = 20000UL;  // 单次流读取总超时
     unsigned long deadline = millis() + kReadTimeout;
     bool stop_early = false;
 
     while (!stop_early && millis() < deadline) {
-        if (!stream->available()) {
+        int avail = stream->available();
+        if (avail <= 0) {
             if (!http.connected()) break;
-            delay(2);
+            // 无数据时短暂让出 CPU，但不 delay(2)（那会把每字节都拖慢 2ms）
+            delay(1);
             continue;
         }
-        // 更新 deadline：只要还在收数据就续期，避免大模型思考时被切断
+
+        // 更新 deadline：只要还在收数据就续期
         deadline = millis() + kReadTimeout;
 
-        int ch = stream->read();
-        if (ch < 0) continue;
+        // 批量读入，最多读满 s_batch_buf
+        int to_read = avail < (int)sizeof(s_batch_buf) ? avail : (int)sizeof(s_batch_buf);
+        int got = (int)stream->readBytes(s_batch_buf, to_read);
+        if (got <= 0) continue;
 
-        if (ch == '\n') {
-            // 去掉末尾的 '\r'（Windows 风格行尾）
+        // 扫描本批数据，按 '\n' 切行
+        const char* p = s_batch_buf;
+        const char* end = s_batch_buf + got;
+        while (p < end && !stop_early) {
+            // 找下一个 '\n'
+            const char* nl = (const char*)memchr(p, '\n', (size_t)(end - p));
+            if (nl == nullptr) {
+                // 本批没有换行符，全部追加到 line 缓冲
+                int chunk = (int)(end - p);
+                int space = (int)sizeof(s_line_buf) - 1 - line_len;
+                if (chunk > space) chunk = space;  // 溢出截断
+                if (chunk > 0) {
+                    memcpy(s_line_buf + line_len, p, chunk);
+                    line_len += chunk;
+                }
+                break;
+            }
+
+            // 把 [p, nl) 追加到 line 缓冲（nl 指向 '\n'，不含）
+            int chunk = (int)(nl - p);
+            int space = (int)sizeof(s_line_buf) - 1 - line_len;
+            if (chunk > space) chunk = space;
+            if (chunk > 0) {
+                memcpy(s_line_buf + line_len, p, chunk);
+                line_len += chunk;
+            }
+
+            // 去掉末尾的 '\r'（Windows 风格 \r\n）
             if (line_len > 0 && s_line_buf[line_len - 1] == '\r') {
                 --line_len;
             }
             s_line_buf[line_len] = '\0';
 
             if (line_len > 0) {
-                // 把 C 字符串包成 Arduino String 交给回调；
-                // 回调返回 false 时提前终止读取流
                 String line_str(s_line_buf);
                 if (!onLine(line_str)) {
                     stop_early = true;
                 }
             }
+
+            // 移动到 '\n' 之后继续扫
+            p = nl + 1;
             line_len = 0;
-        } else {
-            if (line_len < (int)sizeof(s_line_buf) - 1) {
-                s_line_buf[line_len++] = (char)ch;
-            }
-            // 溢出：截断，等下一个 '\n' 再重置
         }
     }
 
@@ -237,8 +266,7 @@ String httpGet(const char* url, const char* authHeader) {
         begin_ok = http.begin(url);
     }
     if (!begin_ok) {
-        DEBUG_PRINT("[HTTP] begin 失败: ");
-        DEBUG_PRINTLN(url);
+        DEBUG_LOG("[HTTP] begin 失败: %s", url);
         return String();
     }
 
@@ -249,19 +277,16 @@ String httpGet(const char* url, const char* authHeader) {
         http.addHeader("Authorization", authHeader);
     }
 
-    DEBUG_PRINT("[HTTP] GET ");
-    DEBUG_PRINTLN(url);
+    DEBUG_LOG("[HTTP] GET %s", url);
 
     int httpCode = http.GET();
     String response;
 
     if (httpCode > 0) {
-        DEBUG_PRINT("[HTTP] 状态码: ");
-        DEBUG_PRINTLN(httpCode);
+        DEBUG_LOG("[HTTP] 状态码: %d", httpCode);
         response = http.getString();
     } else {
-        DEBUG_PRINT("[HTTP] 请求失败, 错误: ");
-        DEBUG_PRINTLN(http.errorToString(httpCode));
+        DEBUG_LOG("[HTTP] 请求失败, 错误: %s", http.errorToString(httpCode).c_str());
     }
 
     http.end();
