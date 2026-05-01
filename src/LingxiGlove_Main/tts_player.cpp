@@ -122,7 +122,12 @@ static bool ReadWavHeader(WiFiClient* client,
             }
         } else if (chunk_header[0] == 'd' && chunk_header[1] == 'a' &&
                    chunk_header[2] == 't' && chunk_header[3] == 'a') {
-            *out_data_bytes = size;
+            // Qwen-TTS 返回的是"流式 WAV"：服务端生成时不知总长度，
+            // 所以 data chunk size 字段填了 0xFFFFFFFF 或接近 INT32_MAX 的占位值。
+            // 检测到超大值（> 4 MB）时归一化为 0，让调用方以"流式未知长度"模式播放，
+            // 靠 HTTP 连接断开 + 空读超时来决定何时结束，而不依赖 remaining 计数。
+            const uint32_t kMaxReasonableWavBytes = 4u * 1024u * 1024u;  // 4 MB
+            *out_data_bytes = (size > kMaxReasonableWavBytes) ? 0u : size;
             return true;
         } else {
             // 其他 chunk（"LIST"/"bext"/...）：跳过
@@ -364,19 +369,36 @@ bool speak(const char* text) {
     //   speak() 不会被并发/重入调用（串口/手势均为串行触发），static 安全。
     static uint8_t s_download_buf[4096];
     size_t  total_written = 0;
-    size_t  remaining     = (size_t)wav_data_bytes;
 
-    const unsigned long kOverallTimeoutMs = 15000;  // 单次播报最长 15 s
+    // wav_data_bytes == 0 表示"流式 WAV"（服务端 data chunk size 填了占位大值，
+    // 已在 ReadWavHeader 里归一化为 0）。流式模式下不用 remaining 计数，
+    // 而是靠 HTTP 连接断开 + 空读超时来决定何时结束。
+    const bool is_streaming_wav = (wav_data_bytes == 0);
+    size_t remaining = is_streaming_wav ? 0u : (size_t)wav_data_bytes;
+
+    // 流式 WAV 用较长的总超时（60s），防止服务端合成极长文本时被截断；
+    // 非流式 WAV 保留 15s 保护，防止因 remaining 计算有误而死循环。
+    const unsigned long kOverallTimeoutMs = is_streaming_wav ? 60000UL : 15000UL;
     const unsigned long kIdleTimeoutMs    = 3000;   // 连续 3 s 无数据中止
     const unsigned long start_ms = millis();
     unsigned long last_data_ms = start_ms;
 
-    while (remaining > 0 && (http.connected() || stream->available() > 0)) {
-        size_t want = (remaining > sizeof(s_download_buf)) ? sizeof(s_download_buf) : remaining;
+    // 循环终止条件：
+    //   流式模式：靠 !http.connected() && !stream->available() + 空读超时退出
+    //   非流式模式：remaining == 0（读完全部预期字节）或超时退出
+    while (true) {
+        bool has_remaining = is_streaming_wav ? true : (remaining > 0);
+        bool has_connection = (http.connected() || stream->available() > 0);
+        if (!has_remaining || !has_connection) break;
+
+        size_t want = is_streaming_wav
+                          ? sizeof(s_download_buf)
+                          : (remaining > sizeof(s_download_buf) ? sizeof(s_download_buf) : remaining);
+
         int available = stream->available();
         if (available > 0) {
             // 尽量按 want 读满；readBytes 内部会等到 want 或超时才返回，
-            // 比之前按 available 单包读效率更高、I2S 喂数据更连续。
+            // 比按 available 单包读效率更高、I2S 喂数据更连续。
             size_t got = stream->readBytes(s_download_buf, want);
             if (got > 0) {
                 // 软件增益：对 PCM 样本做饱和放大（gain=1.0 时被编译器优化为无操作）
@@ -384,15 +406,15 @@ bool speak(const char* text) {
                 size_t bytes_written = 0;
                 i2s_write(I2S_NUM_0, s_download_buf, got, &bytes_written, portMAX_DELAY);
                 total_written += bytes_written;
-                remaining     -= got;
+                if (!is_streaming_wav) remaining -= got;
                 last_data_ms  = millis();
             }
         } else {
             if (millis() - last_data_ms > kIdleTimeoutMs) {
-                DEBUG_PRINTLN("[TTS] 警告: 音频流空读超时，提前结束");
+                DEBUG_PRINTLN("[TTS] 音频流结束（连续 3s 无数据）");
                 break;
             }
-            // 空等间隔由 2 ms 缩到 1 ms：WiFi 包到达本就是 ms 级事件，更密的轮询
+            // 空等 1 ms：WiFi 包到达本就是 ms 级事件，更密的轮询
             // 能缩短"数据已到但我们还没读"的盲区，配合大 DMA 缓冲基本消除顿挫。
             delay(1);
         }
