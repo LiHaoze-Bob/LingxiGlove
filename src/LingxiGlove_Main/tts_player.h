@@ -3,8 +3,9 @@
 
 #include <Arduino.h>
 
-// I2S 主时钟对应的默认采样率；与 initTTS() 里的 i2s_config.sample_rate 保持一致
-#define TTS_I2S_DEFAULT_SAMPLE_RATE  16000u
+// I2S 主时钟对应的默认采样率；与 initTTS() 里的 i2s_config.sample_rate 保持一致。
+// 使用 24kHz 与 Qwen-TTS 输出格式一致，消除采样率来回切换导致的"滋滋"杂音。
+#define TTS_I2S_DEFAULT_SAMPLE_RATE  24000u
 
 // 初始化I2S音频输出
 bool initTTS();
