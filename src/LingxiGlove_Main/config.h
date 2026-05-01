@@ -30,7 +30,7 @@
 //   返回 JSON，其中 output.audio.url 是 24h 有效的 .wav 下载链接（PCM 16-bit Mono）。
 // 端侧流程：POST 拿 url → GET 流式下载 wav → 跳过 44B RIFF 头 → 塞 I2S。
 #define QWEN_TTS_ENDPOINT      "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
-#define QWEN_TTS_MODEL         "qwen-tts"        // 稳定版；亦可改 "qwen3-tts-flash"
+#define QWEN_TTS_MODEL         "qwen3-tts-flash"  // Flash 版，合成速度比 qwen-tts 快约 30%；REST 接口不变
 #define QWEN_TTS_VOICE         "Cherry"          // 可选：Cherry/Ethan/Nofish/Jennifer/Ryan/... 详见官方文档
 #define QWEN_TTS_LANGUAGE      "Chinese"         // Chinese / English / Auto
 // Qwen-TTS 输出固定 24 kHz / 16-bit / Mono（官方流式示例实锤 rate=24000）。
@@ -122,6 +122,30 @@
 // MVP阶段：设为 0 跳过LLM测试，直接走 传感器→识别→TTS 链路
 // 设为 1 则在 setup 中额外测试 LLM 连通性
 #define ENABLE_LLM_TEST         0
+
+// ------------------- LLM 改写（手势 → 自然句） -------------------
+// 在识别到手势/手势序列之后，先调 Qwen LLM 把"词/字母/短序列"改写成
+// 一句自然中文口语，再交给 TTS 播报。失败/超时/未联网时回落到原始词，
+// 保证链路永远可用。
+//   0 = 关闭（识别到什么就播什么，保留 MVP 最小链路）
+//   1 = 开启（默认；需要 WiFi + QWEN_API_KEY）
+#define ENABLE_LLM_REWRITE      1
+
+// 最终改写结果的长度上限（字节）。超过则视为异常（LLM 胡乱发挥 / 把 prompt
+// 回声了），丢弃本次改写、回落到原始词。
+// 25 字汉语 ≈ 75 UTF-8 字节，留一倍余量到 160。
+#define LLM_REWRITE_MAX_BYTES   160
+
+// 改写 prompt 模板。%s 会被替换为手势序列字符串（如 "你好" 或 "我,吃饭"）。
+// 原则：
+//   - 明确只输出一句话本身（避免模型返回 "好的，这句话是："前缀）
+//   - 限制长度在 25 汉字内，符合 TTS 合成时延预算（24 kHz WAV ~1s/5字）
+//   - 要求口语化，符合"把手语词序补全为自然句"的真实使用场景
+#define LLM_REWRITE_PROMPT_TEMPLATE \
+    "你是手语翻译助手。下面按时间顺序给出识别到的中文手语词或字母序列：" \
+    "「%s」。" \
+    "请把它改写成一句最自然、最简短的中文口语（不超过 25 字）。" \
+    "只输出这句话本身，不要任何解释、前缀、引号、括号或换行。"
 
 // ------------------- ESP-NOW 双手同步（A 阶段接口预埋） -------------------
 // 目的：为"双手手语翻译"方案预留底层通信层。启用后，从手（SLAVE）通过
