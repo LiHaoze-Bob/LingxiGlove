@@ -17,9 +17,9 @@
 #include "calibration.h"
 #include "local_tts_fallback.h"
 
-#if ENABLE_LLM_TEST
+// LLM 客户端：除 ENABLE_LLM_TEST 启动自检外，主循环里的 LLM 改写层
+// （rewriteGestureToSentence）与串口命令 'l' 都需要它，统一无条件 include。
 #include "llm_client.h"
-#endif
 
 // ------------------- 运行模式 -------------------
 enum RunMode {
@@ -258,9 +258,35 @@ static void doRecognizeStep(const SensorData& data, unsigned long now) {
         Serial.print(result.confidence, 2);
         Serial.println(")");
 
-        // 两级播报：在线百度 TTS 失败 → 离线 PCM 查表兜底
+        // ----- LLM 改写层 -----
+        // 把识别到的"词/短序列"交给 Qwen 改写为一句自然中文口语（如 "吃饭"
+        // → "我想吃饭"）。失败/未联网/超长时 rewriteGestureToSentence 返回空
+        // String，此处回落到原始 result.text，确保播报链路永远可用。
+        // 这里用栈上 char[] 做为最终送入 speak() 的指针，避免 String 跨作用域
+        // 引用；spoken_text 要么指向 result.text，要么指向 rewritten.c_str()，
+        // rewritten 的生命周期覆盖整个 if 块。
+        const char* spoken_text = result.text;
+        String rewritten;
+#if ENABLE_LLM_REWRITE
+        if (WiFi.status() == WL_CONNECTED) {
+            rewritten = rewriteGestureToSentence(result.text);
+            if (rewritten.length() > 0) {
+                Serial.print("[识别] LLM 改写为自然句: ");
+                Serial.println(rewritten);
+                spoken_text = rewritten.c_str();
+            } else {
+                Serial.println("[识别] LLM 改写失败/未启用，回落原始手势词");
+            }
+        } else {
+            Serial.println("[识别] WiFi 未就绪，跳过 LLM 改写");
+        }
+#endif
+
+        // 两级播报：云端 TTS 失败 → 离线 PCM 查表兜底
         // 两级都失败才算播报失败；不在此处做蜂鸣兜底，避免把"无可用语音"伪装成"正常播报"
-        bool spoken = speak(result.text);
+        // 注意：离线兜底的 label 仍用 result.text（手势词原文），因为离线 PCM
+        // 表是按"手势词 → 预录音频"建立的，改写后的自然句不会命中。
+        bool spoken = speak(spoken_text);
         if (!spoken) {
             Serial.println("[系统] 在线 TTS 失败，尝试离线兜底 ...");
             if (PlayOfflineVoice(result.text)) {
@@ -313,6 +339,8 @@ static void haltWithError() {
 static void printHelp() {
     Serial.println("  [串口命令] r=识别模式  c=词级采集  f=指拼采集  k=个体校准");
     Serial.println("             t <文本>=手动触发 Qwen-TTS 播报（脱离手势流验证 TTS 链路）");
+    Serial.println("             l <手势序列>=LLM 改写为自然句后再 TTS 播报");
+    Serial.println("             (序列可用逗号/空格分隔，如: l 我,吃饭  或  l 你好)");
     Serial.println("             h=帮助");
 }
 
@@ -431,6 +459,59 @@ static void handleSerialCommand() {
                 }
             } else {
                 Serial.println("[TTS] 云端播报完成");
+            }
+            break;
+        }
+        case 'l':
+        case 'L': {
+            // 手动触发 LLM 改写 + TTS：'l <sequence>' 读一整行"手势序列"，
+            // 交给 rewriteGestureToSentence 改写成自然句，再喂 speak()。
+            // 设计目的：脱离真实手势识别流，独立验证 LLM 改写 + TTS 两段链路，
+            // 便于调试 prompt / 模型版本 / 失败回落行为。
+            // 输入示例：
+            //   l 你好              → LLM: "你好呀"
+            //   l 我,吃饭           → LLM: "我想吃饭"
+            //   l H,E,L,L,O         → LLM: "你好"
+            char seq_buf[256];
+            Serial.println("\n[LLM] 请在 5 秒内输入手势序列并回车（逗号/空格分隔）：");
+            if (!readSerialLine(seq_buf, sizeof(seq_buf), 5000UL)) {
+                Serial.println("[LLM] 未读到有效序列，取消本次改写");
+                break;
+            }
+            Serial.print("[LLM] 手势序列: ");
+            Serial.println(seq_buf);
+
+            if (WiFi.status() != WL_CONNECTED) {
+                Serial.println("[LLM] WiFi 未就绪，跳过改写，直接按原序列喂 TTS");
+                bool ok = speak(seq_buf);
+                if (!ok) {
+                    Serial.println("[LLM] 云端 TTS 失败，尝试离线兜底 ...");
+                    if (!PlayOfflineVoice(seq_buf)) {
+                        Serial.println("[LLM] 离线兜底也未命中，本次无声音输出");
+                    }
+                }
+                break;
+            }
+
+            String sentence = rewriteGestureToSentence(seq_buf);
+            const char* to_speak = seq_buf;
+            if (sentence.length() > 0) {
+                Serial.print("[LLM] 改写为: ");
+                Serial.println(sentence);
+                to_speak = sentence.c_str();
+            } else {
+                Serial.println("[LLM] 改写失败，回落原序列喂 TTS");
+            }
+
+            bool ok = speak(to_speak);
+            if (!ok) {
+                Serial.println("[LLM] 云端 TTS 失败，尝试离线兜底 ...");
+                // 离线兜底仍按原序列匹配（离线表是按手势词建的）
+                if (!PlayOfflineVoice(seq_buf)) {
+                    Serial.println("[LLM] 离线兜底也未命中，本次无声音输出");
+                }
+            } else {
+                Serial.println("[LLM] LLM 改写 + TTS 播报完成");
             }
             break;
         }
