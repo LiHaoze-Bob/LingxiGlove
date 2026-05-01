@@ -74,88 +74,91 @@ void setup() {
     printBanner();
 
     // ---------- 1. 初始化传感器 ----------
-    Serial.println("[系统] 正在初始化传感器...");
+    DEBUG_PRINTLN("[系统] 正在初始化传感器...");
     if (!initSensors()) {
-        Serial.println("[系统] 错误: 传感器初始化失败，请检查 MPU6050 接线");
-        Serial.println("  预期接线: SDA->A4/GPIO11, SCL->A5/GPIO12");
+        DEBUG_PRINTLN("[系统] 错误: 传感器初始化失败，请检查 MPU6050 接线");
+        DEBUG_PRINTLN("  预期接线: SDA->A4/GPIO11, SCL->A5/GPIO12");
         haltWithError();
     }
-    Serial.println("[系统] 传感器初始化成功");
+    DEBUG_PRINTLN("[系统] 传感器初始化成功");
 
     // ---------- 1.5 加载并应用个体校准 ----------
     // 未校准/首次启动时 LoadCalibration 返回 false，g_cal 被 Reset 为全零，
     // ApplyCalibration 则把 sensor_manager 的偏移/量程也写回默认值。
     if (LoadCalibration(&g_cal)) {
-        Serial.println("[系统] 个体校准已从 NVS 加载");
+        DEBUG_PRINTLN("[系统] 个体校准已从 NVS 加载");
         PrintCalibration(g_cal);
     } else {
-        Serial.println("[系统] 未找到有效校准（首次启动或版本失配），使用默认值");
-        Serial.println("        建议按 'k' 进行一次零偏校准以提升识别稳定性");
+        DEBUG_PRINTLN("[系统] 未找到有效校准（首次启动或版本失配），使用默认值");
+        DEBUG_PRINTLN("        建议按 'k' 进行一次零偏校准以提升识别稳定性");
     }
     ApplyCalibration(g_cal);
 
     // ---------- 2. 初始化手势识别器 ----------
-    Serial.println("[系统] 正在初始化手势识别器...");
+    DEBUG_PRINTLN("[系统] 正在初始化手势识别器...");
     g_recognizer = createGestureRecognizer();
     if (!g_recognizer) {
-        Serial.println("[系统] 错误: 无法创建手势识别器");
+        DEBUG_PRINTLN("[系统] 错误: 无法创建手势识别器");
         haltWithError();
     }
     if (!g_recognizer->init()) {
-        Serial.println("[系统] 错误: 手势识别器初始化失败");
+        DEBUG_PRINTLN("[系统] 错误: 手势识别器初始化失败");
         haltWithError();
     }
-    Serial.print("[系统] 手势识别器就绪: ");
-    Serial.println(g_recognizer->getName());
+    DEBUG_LOG("[系统] 手势识别器就绪: %s", g_recognizer->getName());
 
     // ---------- 3. 初始化 I2S 音频 ----------
-    Serial.println("[系统] 正在初始化 I2S 音频...");
+    DEBUG_PRINTLN("[系统] 正在初始化 I2S 音频...");
     if (!initTTS()) {
-        Serial.println("[系统] 警告: I2S 音频初始化失败，语音播报不可用");
-        Serial.println("  预期接线: BCLK->D4/GPIO7, LRC->D5/GPIO8, DIN->D6/GPIO9");
+        DEBUG_PRINTLN("[系统] 警告: I2S 音频初始化失败，语音播报不可用");
+        DEBUG_PRINTLN("  预期接线: BCLK->D4/GPIO7, LRC->D5/GPIO8, DIN->D6/GPIO9");
         // 非致命错误，继续运行
     } else {
-        Serial.println("[系统] I2S 初始化成功，播放开机提示音...");
+        DEBUG_PRINTLN("[系统] I2S 初始化成功，播放开机提示音...");
         playTestTone(880, 200);   // A5
         delay(100);
         playTestTone(1100, 200);  // C#6
     }
 
     // ---------- 4. 连接 WiFi ----------
-    Serial.println("[系统] 正在连接 WiFi...");
+    DEBUG_PRINTLN("[系统] 正在连接 WiFi...");
     bool wifiOk = false;
     while (!wifiOk) {
         wifiOk = connectWiFi(WIFI_SSID, WIFI_PASSWORD, WIFI_TIMEOUT_MS);
         if (!wifiOk) {
-            Serial.println("[系统] WiFi 连接失败，5秒后重试...");
+            DEBUG_PRINTLN("[系统] WiFi 连接失败，5秒后重试...");
             delay(5000);
         }
     }
 
 #if ENABLE_LLM_TEST
     // ---------- 5. 可选：测试 LLM 连通性 ----------
-    Serial.println("[系统] 测试 LLM 连通性...");
+    DEBUG_PRINTLN("[系统] 测试 LLM 连通性...");
     if (initLLM()) {
         String reply = chatLLM("你好，请用一句话打招呼");
-        Serial.print("[LLM] 测试回复: ");
-        Serial.println(reply);
+        DEBUG_LOG("[LLM] 测试回复: %s", reply.c_str());
     } else {
-        Serial.println("[系统] 警告: LLM 初始化失败");
+        DEBUG_PRINTLN("[系统] 警告: LLM 初始化失败");
     }
 #endif
 
     // ---------- 系统就绪 ----------
     g_systemReady = true;
-    Serial.println("\n============================================");
-    Serial.println("  MVP 链路就绪，开始手势识别...");
-    Serial.println("============================================");
-    Serial.println("  支持手势: 朝上=你好 | 朝下=谢谢 | 左倾=再见 | 右倾=是 | 竖直=不");
+    DEBUG_PRINTLN("\n============================================");
+    DEBUG_PRINTLN("  MVP 链路就绪，开始手势识别...");
+    DEBUG_PRINTLN("============================================");
+    DEBUG_PRINTLN("  支持手势: 朝上=你好 | 朝下=谢谢 | 左倾=再见 | 右倾=是 | 竖直=不");
     printHelp();
-    Serial.println("============================================\n");
+    DEBUG_PRINTLN("============================================\n");
 
     // 播放就绪提示语音
+    // WiFi 刚连上时 TLS 栈可能还没热身，第一次失败后等 2s 重试一次
     if (isWiFiConnected()) {
-        speak("灵犀手套已就绪");
+        if (!speak("灵犀手套已就绪")) {
+            DEBUG_PRINTLN("[系统] 开机 TTS 失败，2s 后重试一次...");
+            delay(2000);
+            speak("灵犀手套已就绪");
+        }
     }
 }
 
@@ -186,7 +189,7 @@ void loop() {
     // ---------- 1. 读取传感器 ----------
     SensorData data;
     if (!readSensors(data)) {
-        Serial.println("[系统] 传感器读取失败");
+        DEBUG_PRINTLN("[系统] 传感器读取失败");
         checkWiFiConnection(WIFI_SSID, WIFI_PASSWORD);
         return;
     }
@@ -221,13 +224,10 @@ static void doRecognizeStep(const SensorData& data, unsigned long now) {
     MotionDecision md = g_motionDetector.Update(ms);
 
     if (md.state_changed) {
-        Serial.print("[门控] 状态切换: ");
-        Serial.print(md.state == MOTION_STATE_MOVING ? "STILL→MOVING" : "MOVING→STILL");
-        Serial.print("  var(|a|)=");
-        Serial.print(md.accel_mag_variance, 5);
-        Serial.print("  |gyro|=");
-        Serial.print(md.gyro_magnitude, 2);
-        Serial.println();
+        DEBUG_LOG("[门控] 状态切换: %s  var(|a|)=%.5f  |gyro|=%.2f",
+                  md.state == MOTION_STATE_MOVING ? "STILL→MOVING" : "MOVING→STILL",
+                  (double)md.accel_mag_variance,
+                  (double)md.gyro_magnitude);
         g_lastMotionState = md.state;
     }
 
@@ -252,11 +252,7 @@ static void doRecognizeStep(const SensorData& data, unsigned long now) {
         result.type != g_lastAnnouncedGesture &&
         now - g_lastAnnounceTime > (unsigned long)TTS_COOLDOWN_MS) {
 
-        Serial.print("\n[识别] 检测到手势: ");
-        Serial.print(result.text);
-        Serial.print(" (置信度: ");
-        Serial.print(result.confidence, 2);
-        Serial.println(")");
+        DEBUG_LOG("\n[识别] 检测到手势: %s (置信度: %.2f)", result.text, (double)(result.confidence));
 
         // ----- LLM 改写层 -----
         // 把识别到的"词/短序列"交给 Qwen 改写为一句自然中文口语（如 "吃饭"
@@ -271,14 +267,13 @@ static void doRecognizeStep(const SensorData& data, unsigned long now) {
         if (WiFi.status() == WL_CONNECTED) {
             rewritten = rewriteGestureToSentence(result.text);
             if (rewritten.length() > 0) {
-                Serial.print("[识别] LLM 改写为自然句: ");
-                Serial.println(rewritten);
+                DEBUG_LOG("[识别] LLM 改写为自然句: %s", rewritten.c_str());
                 spoken_text = rewritten.c_str();
             } else {
-                Serial.println("[识别] LLM 改写失败/未启用，回落原始手势词");
+                DEBUG_PRINTLN("[识别] LLM 改写失败/未启用，回落原始手势词");
             }
         } else {
-            Serial.println("[识别] WiFi 未就绪，跳过 LLM 改写");
+            DEBUG_PRINTLN("[识别] WiFi 未就绪，跳过 LLM 改写");
         }
 #endif
 
@@ -288,20 +283,18 @@ static void doRecognizeStep(const SensorData& data, unsigned long now) {
         // 表是按"手势词 → 预录音频"建立的，改写后的自然句不会命中。
         bool spoken = speak(spoken_text);
         if (!spoken) {
-            Serial.println("[系统] 在线 TTS 失败，尝试离线兜底 ...");
+            DEBUG_PRINTLN("[系统] 在线 TTS 失败，尝试离线兜底 ...");
             if (PlayOfflineVoice(result.text)) {
-                Serial.println("[系统] 离线兜底播报成功");
+                DEBUG_PRINTLN("[系统] 离线兜底播报成功");
                 spoken = true;
             } else if (OfflineVoiceCount() == 0) {
-                Serial.println("[系统] 离线 PCM 表为空，未配置兜底数据 (见 tools/gen_offline_voice_pcm.py)");
+                DEBUG_PRINTLN("[系统] 离线 PCM 表为空，未配置兜底数据 (见 tools/gen_offline_voice_pcm.py)");
             } else {
-                Serial.print("[系统] 离线兜底也未命中 label='");
-                Serial.print(result.text);
-                Serial.println("'");
+                DEBUG_LOG("[系统] 离线兜底也未命中 label='%s'", result.text);
             }
         }
         if (!spoken) {
-            Serial.println("[系统] 全部播报通道失败，本次识别无声音输出");
+            DEBUG_PRINTLN("[系统] 全部播报通道失败，本次识别无声音输出");
         }
 
         g_lastAnnouncedGesture = result.type;
@@ -319,15 +312,15 @@ static void doRecognizeStep(const SensorData& data, unsigned long now) {
 // ============================================================
 
 static void printBanner() {
-    Serial.println("\n============================================");
-    Serial.println("  LingxiGlove 灵犀手套");
-    Serial.println("  智能手语翻译系统 - MVP 验证版");
-    Serial.println("============================================");
+    DEBUG_PRINTLN("\n============================================");
+    DEBUG_PRINTLN("  LingxiGlove 灵犀手套");
+    DEBUG_PRINTLN("  智能手语翻译系统 - MVP 验证版");
+    DEBUG_PRINTLN("============================================");
 }
 
 static void haltWithError() {
-    Serial.println("\n[系统] 遇到致命错误，系统停止运行。");
-    Serial.println("  请检查硬件接线后重启。");
+    DEBUG_PRINTLN("\n[系统] 遇到致命错误，系统停止运行。");
+    DEBUG_PRINTLN("  请检查硬件接线后重启。");
     while (1) {
         delay(1000);
     }
@@ -337,11 +330,11 @@ static void haltWithError() {
 // 串口命令交互
 // ============================================================
 static void printHelp() {
-    Serial.println("  [串口命令] r=识别模式  c=词级采集  f=指拼采集  k=个体校准");
-    Serial.println("             t <文本>=手动触发 Qwen-TTS 播报（脱离手势流验证 TTS 链路）");
-    Serial.println("             l <手势序列>=LLM 改写为自然句后再 TTS 播报");
-    Serial.println("             (序列可用逗号/空格分隔，如: l 我,吃饭  或  l 你好)");
-    Serial.println("             h=帮助");
+    DEBUG_PRINTLN("  [串口命令] r=识别模式  c=词级采集  f=指拼采集  k=个体校准");
+    DEBUG_PRINTLN("             t <文本>=手动触发 Qwen-TTS 播报（脱离手势流验证 TTS 链路）");
+    DEBUG_PRINTLN("             l <手势序列>=LLM 改写为自然句后再 TTS 播报");
+    DEBUG_PRINTLN("             (序列可用逗号/空格分隔，如: l 我,吃饭  或  l 你好)");
+    DEBUG_PRINTLN("             h=帮助");
 }
 
 /**
@@ -403,8 +396,8 @@ static void handleSerialCommand() {
             if (g_runMode != MODE_CAPTURE) {
                 g_runMode = MODE_CAPTURE;
                 g_motionDetector.Reset();
-                Serial.println("\n[模式] 进入词级采集模式（CSV 流），识别与 TTS 已暂停");
-                Serial.println("[模式] 按 r 回到识别模式");
+                DEBUG_PRINTLN("\n[模式] 进入词级采集模式（CSV 流），识别与 TTS 已暂停");
+                DEBUG_PRINTLN("[模式] 按 r 回到识别模式");
                 printCsvHeader();
             }
             break;
@@ -413,9 +406,9 @@ static void handleSerialCommand() {
             if (g_runMode != MODE_FINGER_SPELLING) {
                 g_runMode = MODE_FINGER_SPELLING;
                 g_motionDetector.Reset();
-                Serial.println("\n[模式] 进入指拼采集模式（CSV 流），识别与 TTS 已暂停");
-                Serial.println("[模式] 说明: 指拼识别模型尚未训练，该模式当前仅做原始数据采集；");
-                Serial.println("       作为未来「开放词汇兜底通道」的接入点。按 r 回到识别模式");
+                DEBUG_PRINTLN("\n[模式] 进入指拼采集模式（CSV 流），识别与 TTS 已暂停");
+                DEBUG_PRINTLN("[模式] 说明: 指拼识别模型尚未训练，该模式当前仅做原始数据采集；");
+                DEBUG_PRINTLN("       作为未来「开放词汇兜底通道」的接入点。按 r 回到识别模式");
                 printCsvHeader();
             }
             break;
@@ -425,13 +418,13 @@ static void handleSerialCommand() {
                 g_runMode = MODE_RECOGNIZE;
                 g_lastAnnouncedGesture = GESTURE_NONE;
                 g_motionDetector.Reset();
-                Serial.println("\n[模式] 恢复识别模式");
+                DEBUG_PRINTLN("\n[模式] 恢复识别模式");
             }
             break;
         case 'k':
         case 'K':
             if (g_runMode != MODE_RECOGNIZE) {
-                Serial.println("\n[校准] 请先按 r 回到识别模式再执行校准，避免污染采集数据流");
+                DEBUG_PRINTLN("\n[校准] 请先按 r 回到识别模式再执行校准，避免污染采集数据流");
                 break;
             }
             runCalibrationFlow();
@@ -444,21 +437,20 @@ static void handleSerialCommand() {
             // （部分串口工具以 Enter 单独结尾）。readSerialLine 已处理首空白与
             // 空行容错，直接读即可。
             char text_buf[256];
-            Serial.println("\n[TTS] 请在 5 秒内输入要播报的文本并回车：");
+            DEBUG_PRINTLN("\n[TTS] 请在 5 秒内输入要播报的文本并回车：");
             if (!readSerialLine(text_buf, sizeof(text_buf), 5000UL)) {
-                Serial.println("[TTS] 未读到有效文本，取消本次播报");
+                DEBUG_PRINTLN("[TTS] 未读到有效文本，取消本次播报");
                 break;
             }
-            Serial.print("[TTS] 手动触发播报: ");
-            Serial.println(text_buf);
+            DEBUG_LOG("[TTS] 手动触发播报: %s", text_buf);
             bool ok = speak(text_buf);
             if (!ok) {
-                Serial.println("[TTS] 云端失败，尝试离线兜底 ...");
+                DEBUG_PRINTLN("[TTS] 云端失败，尝试离线兜底 ...");
                 if (!PlayOfflineVoice(text_buf)) {
-                    Serial.println("[TTS] 离线兜底也未命中，本次无声音输出");
+                    DEBUG_PRINTLN("[TTS] 离线兜底也未命中，本次无声音输出");
                 }
             } else {
-                Serial.println("[TTS] 云端播报完成");
+                DEBUG_PRINTLN("[TTS] 云端播报完成");
             }
             break;
         }
@@ -473,21 +465,20 @@ static void handleSerialCommand() {
             //   l 我,吃饭           → LLM: "我想吃饭"
             //   l H,E,L,L,O         → LLM: "你好"
             char seq_buf[256];
-            Serial.println("\n[LLM] 请在 5 秒内输入手势序列并回车（逗号/空格分隔）：");
+            DEBUG_PRINTLN("\n[LLM] 请在 5 秒内输入手势序列并回车（逗号/空格分隔）：");
             if (!readSerialLine(seq_buf, sizeof(seq_buf), 5000UL)) {
-                Serial.println("[LLM] 未读到有效序列，取消本次改写");
+                DEBUG_PRINTLN("[LLM] 未读到有效序列，取消本次改写");
                 break;
             }
-            Serial.print("[LLM] 手势序列: ");
-            Serial.println(seq_buf);
+            DEBUG_LOG("[LLM] 手势序列: %s", seq_buf);
 
             if (WiFi.status() != WL_CONNECTED) {
-                Serial.println("[LLM] WiFi 未就绪，跳过改写，直接按原序列喂 TTS");
+                DEBUG_PRINTLN("[LLM] WiFi 未就绪，跳过改写，直接按原序列喂 TTS");
                 bool ok = speak(seq_buf);
                 if (!ok) {
-                    Serial.println("[LLM] 云端 TTS 失败，尝试离线兜底 ...");
+                    DEBUG_PRINTLN("[LLM] 云端 TTS 失败，尝试离线兜底 ...");
                     if (!PlayOfflineVoice(seq_buf)) {
-                        Serial.println("[LLM] 离线兜底也未命中，本次无声音输出");
+                        DEBUG_PRINTLN("[LLM] 离线兜底也未命中，本次无声音输出");
                     }
                 }
                 break;
@@ -496,22 +487,21 @@ static void handleSerialCommand() {
             String sentence = rewriteGestureToSentence(seq_buf);
             const char* to_speak = seq_buf;
             if (sentence.length() > 0) {
-                Serial.print("[LLM] 改写为: ");
-                Serial.println(sentence);
+                DEBUG_LOG("[LLM] 改写为: %s", sentence);
                 to_speak = sentence.c_str();
             } else {
-                Serial.println("[LLM] 改写失败，回落原序列喂 TTS");
+                DEBUG_PRINTLN("[LLM] 改写失败，回落原序列喂 TTS");
             }
 
             bool ok = speak(to_speak);
             if (!ok) {
-                Serial.println("[LLM] 云端 TTS 失败，尝试离线兜底 ...");
+                DEBUG_PRINTLN("[LLM] 云端 TTS 失败，尝试离线兜底 ...");
                 // 离线兜底仍按原序列匹配（离线表是按手势词建的）
                 if (!PlayOfflineVoice(seq_buf)) {
-                    Serial.println("[LLM] 离线兜底也未命中，本次无声音输出");
+                    DEBUG_PRINTLN("[LLM] 离线兜底也未命中，本次无声音输出");
                 }
             } else {
-                Serial.println("[LLM] LLM 改写 + TTS 播报完成");
+                DEBUG_PRINTLN("[LLM] LLM 改写 + TTS 播报完成");
             }
             break;
         }
@@ -526,9 +516,7 @@ static void handleSerialCommand() {
             // 忽略空白符
             break;
         default:
-            Serial.print("[模式] 未知命令: '");
-            Serial.print((char)ch);
-            Serial.println("'，按 h 查看帮助");
+            DEBUG_LOG("[模式] 未知命令: '%c'，按 h 查看帮助", (char)ch);
             break;
     }
 }
@@ -540,9 +528,9 @@ static void handleSerialCommand() {
 // Flex 量程：ENABLE_FLEX_SENSORS=1 时额外采两阶段（伸直 3s、握拳 3s）
 // ============================================================
 static void runCalibrationFlow() {
-    Serial.println("\n============================================");
-    Serial.println("  [校准] 开始个体校准");
-    Serial.println("============================================");
+    DEBUG_PRINTLN("\n============================================");
+    DEBUG_PRINTLN("  [校准] 开始个体校准");
+    DEBUG_PRINTLN("============================================");
 
     // --- IMU 零偏 ---
     // 关键：先把 sensor_manager 的偏移清零，保证采样回调拿到的是裸物理值。
@@ -550,38 +538,34 @@ static void runCalibrationFlow() {
     // 校准均值会变成"残差"而非真实偏移，叠加后会出现偏移累积的 bug。
     setImuBias(0, 0, 0, 0, 0, 0);
 
-    Serial.println("[校准] 步骤 1/1: IMU 零偏");
-    Serial.println("        请把手套【平放】在桌面，保持静止；3 秒后开始采样，采样 3 秒");
+    DEBUG_PRINTLN("[校准] 步骤 1/1: IMU 零偏");
+    DEBUG_PRINTLN("        请把手套【平放】在桌面，保持静止；3 秒后开始采样，采样 3 秒");
     // 倒计时让用户完成摆放
     for (int i = 3; i > 0; i--) {
-        Serial.print("        ");
-        Serial.print(i);
-        Serial.println(" ...");
+        DEBUG_LOG("        %d ...", i);
         delay(1000);
     }
-    Serial.println("[校准] 采样中，请勿晃动 ...");
+    DEBUG_PRINTLN("[校准] 采样中，请勿晃动 ...");
     bool imu_ok = RunImuZeroingCalibration(&g_cal, readSampleAdapter,
                                            3000 /* duration_ms */,
                                            50   /* interval_ms (~20Hz) */);
     if (!imu_ok) {
-        Serial.println("[校准] IMU 零偏采样失败，放弃本次校准");
+        DEBUG_PRINTLN("[校准] IMU 零偏采样失败，放弃本次校准");
         return;
     }
 
 #if ENABLE_FLEX_SENSORS
     // --- Flex 量程：伸直阶段 ---
-    Serial.println("[校准] 步骤 2/3: 弯曲传感器 min（手指完全【伸直】）");
-    Serial.println("        请五指完全伸直并保持，3 秒后开始采样 3 秒");
+    DEBUG_PRINTLN("[校准] 步骤 2/3: 弯曲传感器 min（手指完全【伸直】）");
+    DEBUG_PRINTLN("        请五指完全伸直并保持，3 秒后开始采样 3 秒");
     for (int i = 3; i > 0; i--) {
-        Serial.print("        ");
-        Serial.print(i);
-        Serial.println(" ...");
+        DEBUG_LOG("        %d ...", i);
         delay(1000);
     }
-    Serial.println("[校准] 采样中 (min) ...");
+    DEBUG_PRINTLN("[校准] 采样中 (min) ...");
     uint16_t flex_min_vals[FLEX_CHANNEL_COUNT];
     if (!RunFlexStageCalibration(flex_min_vals, readFlexRawAdapter, 3000, 50)) {
-        Serial.println("[校准] Flex min 采样失败，保留已完成的 IMU 校准");
+        DEBUG_PRINTLN("[校准] Flex min 采样失败，保留已完成的 IMU 校准");
         // IMU 部分仍然保存
         SaveCalibration(g_cal);
         ApplyCalibration(g_cal);
@@ -590,18 +574,16 @@ static void runCalibrationFlow() {
     }
 
     // --- Flex 量程：握拳阶段 ---
-    Serial.println("[校准] 步骤 3/3: 弯曲传感器 max（手指完全【握拳】）");
-    Serial.println("        请五指完全弯曲握拳并保持，3 秒后开始采样 3 秒");
+    DEBUG_PRINTLN("[校准] 步骤 3/3: 弯曲传感器 max（手指完全【握拳】）");
+    DEBUG_PRINTLN("        请五指完全弯曲握拳并保持，3 秒后开始采样 3 秒");
     for (int i = 3; i > 0; i--) {
-        Serial.print("        ");
-        Serial.print(i);
-        Serial.println(" ...");
+        DEBUG_LOG("        %d ...", i);
         delay(1000);
     }
-    Serial.println("[校准] 采样中 (max) ...");
+    DEBUG_PRINTLN("[校准] 采样中 (max) ...");
     uint16_t flex_max_vals[FLEX_CHANNEL_COUNT];
     if (!RunFlexStageCalibration(flex_max_vals, readFlexRawAdapter, 3000, 50)) {
-        Serial.println("[校准] Flex max 采样失败，保留已完成的 IMU 校准");
+        DEBUG_PRINTLN("[校准] Flex max 采样失败，保留已完成的 IMU 校准");
         SaveCalibration(g_cal);
         ApplyCalibration(g_cal);
         PrintCalibration(g_cal);
@@ -612,13 +594,7 @@ static void runCalibrationFlow() {
     bool flex_sane = true;
     for (uint8_t i = 0; i < FLEX_CHANNEL_COUNT; i++) {
         if ((uint32_t)flex_max_vals[i] <= (uint32_t)flex_min_vals[i] + 32u) {
-            Serial.print("[校准] Flex 通道 ");
-            Serial.print(i);
-            Serial.print(" 量程过小 (min=");
-            Serial.print(flex_min_vals[i]);
-            Serial.print(", max=");
-            Serial.print(flex_max_vals[i]);
-            Serial.println(")，请检查手指是否真的屈伸到位");
+            DEBUG_LOG("[校准] Flex 通道 %d 量程过小 (min=%u, max=%u)，请检查手指是否真的屈伸到位", (int)i, (uint32_t)flex_min_vals[i], (uint32_t)flex_max_vals[i]);
             flex_sane = false;
         }
     }
@@ -629,19 +605,19 @@ static void runCalibrationFlow() {
         }
         g_cal.flags |= CAL_FLAG_FLEX_OK;
     } else {
-        Serial.println("[校准] Flex 校准整体作废，仅保留 IMU 部分");
+        DEBUG_PRINTLN("[校准] Flex 校准整体作废，仅保留 IMU 部分");
     }
 #endif  // ENABLE_FLEX_SENSORS
 
     // --- 写 NVS + 生效 ---
     if (SaveCalibration(g_cal)) {
-        Serial.println("[校准] 已写入 NVS");
+        DEBUG_PRINTLN("[校准] 已写入 NVS");
     } else {
-        Serial.println("[校准] 警告: NVS 写入部分失败，但本次运行的内存态已生效");
+        DEBUG_PRINTLN("[校准] 警告: NVS 写入部分失败，但本次运行的内存态已生效");
     }
     ApplyCalibration(g_cal);
     PrintCalibration(g_cal);
-    Serial.println("[校准] 完成，回到识别模式\n");
+    DEBUG_PRINTLN("[校准] 完成，回到识别模式\n");
 
     // 复位防抖 / 运动状态，避免带着校准前的残留直接触发识别
     g_lastAnnouncedGesture = GESTURE_NONE;
