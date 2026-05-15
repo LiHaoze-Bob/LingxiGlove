@@ -118,7 +118,173 @@
 
 **对齐**：Master 自采样一帧 `right_frame(t_r)` 时，在 Slave 环形缓冲里二分查找 `seq_no` 距离当前最近、且时间偏移 < 25 ms 的 `left_frame`，配对输出 `(left, right, Δt)`。
 
-### 3.3 为什么选 ESP-NOW 而不是 WiFi UDP
+### 3.3 ESP-NOW 技术原理
+
+#### 3.3.1 协议定位与历史背景
+
+**ESP-NOW** 是乐鑫（Espressif）在 ESP8266 上首次提出、在 ESP32 系列上持续迭代的**私有无线通信协议**，运行于 IEEE 802.11 物理层之上，但绕过了 802.11 的关联/认证/分发系统（ADS），本质上是**一种基于 Wi-Fi 帧格式的点对点/广播数据链路层协议**。
+
+与 Wi-Fi 的关系类比：
+- Wi-Fi（STA/AP 模式）≈ 打电话（先拨号建连接，然后通话，结束后挂断）
+- ESP-NOW ≈ 发短信（直接向目标地址发一条消息，无需建连接，对方收到即止）
+
+#### 3.3.2 底层帧格式与封装
+
+ESP-NOW 数据帧基于 **IEEE 802.11 Action 帧**封装，属于 802.11 管理帧（Management Frame）的子类型。这一选择允许 ESP-NOW 在不关联 AP 的情况下直接发送数据：
+
+```
+IEEE 802.11 MAC 帧结构（简化）
+┌──────────────────────────────────────────────────────────────────┐
+│ Frame Control │ Duration │  DA（目标 MAC）  │  SA（源 MAC）       │
+│   (2 bytes)   │ (2 bytes)│   (6 bytes)     │   (6 bytes)        │
+├──────────────────────────────────────────────────────────────────┤
+│  BSSID（基站 MAC，广播时为 FF:FF:FF:FF:FF:FF）（6 bytes）        │
+├──────────────────────────────────────────────────────────────────┤
+│  Sequence Control (2B) │ Action Category(1B) │ OUI(3B)            │
+│  Type/Subtype(1B)      │ 有效载荷 ≤ 250 bytes │  FCS(4B)           │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+关键点：
+- **目标 MAC（DA）**：可以是单播（对端设备的 6 字节 MAC 地址）或广播（`FF:FF:FF:FF:FF:FF`）
+- **OUI（组织唯一标识符）**：乐鑫私有 OUI `18:FE:34`，接收方通过此字段识别 ESP-NOW 帧
+- **有效载荷上限 250 字节**：协议层硬约束，本项目 `HandFrame` 仅 30 字节，余量 220 字节充足
+
+#### 3.3.3 信道与频段
+
+ESP-NOW 使用与 Wi-Fi 相同的 **2.4 GHz ISM 频段**，信道编号 1–14（各地区可用信道有差异，中国 1–13）。每个信道带宽 20 MHz，中心频率为 `2407 + 5×n MHz`（n 为信道号）。
+
+**与 Wi-Fi STA 共信道的关键机制**（本项目使用的配置）：
+
+当 ESP32 处于 Wi-Fi STA 模式并已连接 AP 时，ESP-NOW 自动继承 AP 所在的信道（称为"信道跟随"）。这意味着：
+1. Master 连上家用路由器（假设 AP 在信道 6），则 Master 的 ESP-NOW 也在信道 6
+2. Slave 在初始化 ESP-NOW 时同样设为 STA 模式但不连接 AP，信道跟随依赖 Peer 注册时的 `channel` 字段
+
+**本项目 `esp_now_sync.cpp` 的实际实现（代码为准）**：
+- Slave 调用 `WiFi.mode(WIFI_STA); WiFi.disconnect()` 进入 STA 模式但不关联 AP
+- 注册广播 Peer 时设置 `peer_info.channel = 0`——在 ESP-IDF 中 channel=0 表示"跟随当前 Wi-Fi 信道"，不是手动设定固定信道
+- 这意味着**Slave 的信道由其自身当前 Wi-Fi 信道状态决定**；若 Slave 未连 AP，初始信道为 1（默认值），与 Master（已连 AP）可能不同
+- **实际部署时需确保两块板的 Wi-Fi 信道一致**：最简单的方式是让 Slave 也连接同一个 AP，或在烧录前在 `config.h` 中固定信道并在 `InitEspNowSync` 后手动调用 `esp_wifi_set_channel()`，这是 P2 阶段实测时需要重点验证的信道对齐问题
+
+```
+信道 6（2437 MHz，由 AP 决定）
+      ┌─────────────────────────────────┐
+      │     AP（家用路由器）              │
+      │   Wi-Fi Beacon 每 100ms 一次     │
+      └──────┬──────────────────────────┘
+             │
+    ┌─────────┴──────────┐
+    │                    │
+    ▼                    ▼
+Master（STA 已关联 AP）  Slave（STA 模式，channel=0 跟随）
+  ESP-NOW 在信道 6 ◄──── ESP-NOW 帧直接投递 ────►
+  （⚠️ 信道一致性需 P2 实测验证）
+```
+
+#### 3.3.4 对等体（Peer）注册机制
+
+ESP-NOW 通信前需要将对端注册为"Peer"（对等体），本质是在本地维护一张 **Peer 表**（总 Peer 数最多 20 个，其中加密 Peer 上限因 Wi-Fi 模式而异：STA 模式下最多 **10** 个，SoftAP 或 SoftAP+STA 模式下最多 **6** 个；来源：ESP-IDF 官方文档 + esp32.com 论坛确认）：
+
+```c
+// 注册一个 Peer（以 Slave 广播模式为例）
+esp_now_peer_info_t peer_info = {};
+memcpy(peer_info.peer_addr, broadcast_mac, 6);  // FF:FF:FF:FF:FF:FF
+peer_info.channel = 0;      // 0 = 跟随当前 Wi-Fi 信道
+peer_info.encrypt = false;  // 本项目不启用 CCMP 加密
+esp_now_add_peer(&peer_info);
+```
+
+**广播 vs 单播的选择依据**：
+
+| 模式 | 目标 MAC | ACK 机制 | 吞吐量 | 本项目选择原因 |
+|------|---------|---------|--------|--------------|
+| **广播** | `FF:FF:FF:FF:FF:FF` | ❌ 无 ACK，不重传 | 较高（不等 ACK） | Slave 发帧时不知道 Master MAC，且帧率 20 Hz 下偶发丢帧可接受 |
+| **单播** | 具体 6 字节 MAC | ✅ 有物理层 ACK | 较低（等 ACK，最多 **5 次**重传）| 若事先配置好 MAC 可获更高可靠性，P2 实测后可升级（来源：ESP-IDF GitHub Issue #9383）|
+
+本项目**当前采用广播模式**。**Master 端的接收实现存在一个 workaround**（见 `LingxiGlove_Main.ino` 注释）：由于 `InitEspNowSync` 对 `ESPNOW_ROLE_MASTER + peer_mac=nullptr` 组合直接返回 false（API 设计上要求 Master 必须知道 Slave 的 MAC），而演示阶段不想提前硬编码 MAC，Master 实际上**以 `ESPNOW_ROLE_SLAVE` 身份调用 `InitEspNowSync(nullptr)`**，借用 Slave 初始化路径注册广播 Peer（`FF:FF:FF:FF:FF:FF`），再通过 `RegisterHandFrameHandler` 注入 `OnSlaveHandFrame` 作为上层处理器。ESP-NOW 接收本质上**不依赖 Peer 注册**，只要注册了 `recv_cb`，任何合法的 ESP-NOW 帧都会触发回调；Peer 注册只是发送路径的必要前提。这个 workaround 在 P2 阶段将被替换为正式的"首帧自动添加 Peer"机制。
+
+#### 3.3.5 收发回调机制
+
+ESP-NOW 采用**完全异步回调**模型：
+
+```
+发送侧（Slave）                     接收侧（Master）
+──────────────                     ────────────────
+esp_now_send()                      （随时可能触发）
+    │ 入队到 Wi-Fi 驱动
+    │
+    ▼
+Wi-Fi 驱动异步发送
+    │
+    ▼
+esp_now_send_cb_t
+    ├─ status = SUCCESS  → ACK 收到
+    └─ status = FAIL    → 超时/丢包
+                                    ┌─ Wi-Fi 驱动收到帧
+                                    ▼
+                              底层 recv_cb（OnEspNowRecv / OnEspNowRecvImpl）
+                              ——在系统任务上下文中执行——
+                                    │ 校验帧长 == sizeof(HandFrame)
+                                    │ memcpy 到栈上副本
+                                    │ s_rx_count++
+                                    ▼
+                              调用上层 handler（s_handler）
+                              ——本项目：OnSlaveHandFrame——
+                                    │
+                                    ▼
+                              写入全局缓冲 g_slave_frame
+                              更新 g_slave_frame_rx_ms
+```
+> **注意层级**：`OnEspNowRecv` 是注册给 ESP-IDF 的底层 `recv_cb`（`esp_now_register_recv_cb`），
+> 它在系统任务上下文中执行；`OnSlaveHandFrame` 是通过 `RegisterHandFrameHandler` 注入的
+> 上层业务 handler，由底层 `recv_cb` 在校验完帧长后调用。两者不同层级，严禁在其中做阻塞操作。
+
+**关键约束**（本项目代码注释也有说明）：
+- `recv_cb` 在**系统任务上下文**中执行，**严禁**在其中调用任何阻塞函数（`delay()`、`Serial.println()`、`WiFi.xxx()` 等）
+- `send_cb` 在**Wi-Fi 任务上下文**，同样不能做阻塞 I/O
+- 回调与 `loop()` 并发执行（ESP32-S3 双核）：回调写全局变量，`loop()` 读全局变量，需注意数据一致性
+
+#### 3.3.6 安全机制（CCMP 加密）
+
+ESP-NOW 可选启用 **CCMP（CTR Mode + CBC-MAC Protocol）加密**，这是 WPA2 使用的同款对称加密算法：
+
+- 每对加密 Peer 使用独立的 16 字节 **PMK（Primary Master Key）** + 16 字节 **LMK（Local Master Key）** 派生会话密钥
+- 加密后帧长增加 **16 字节**（8 字节 CCMP header + 8 字节 MIC），这是 IEEE 802.11i 标准规定的固定 overhead，与 WPA2 数据帧完全一致（来源：CWSP 权威资料 / IEEE 802.11i）
+- **本项目当前不启用加密**（`encrypt = false`）：演示场景中数据为手套传感器读数，无隐私风险；启用加密需要双方预共享 PMK，增加配置复杂度，不符合快速迭代的需求
+
+#### 3.3.7 与 Wi-Fi STA 模式共存的射频时分复用
+
+ESP32 只有一个 2.4 GHz 射频前端，ESP-NOW 与 Wi-Fi STA 共享此射频。乐鑫通过**时分复用（TDM）**实现共存：
+
+```
+时间轴（示意，非精确比例）：
+─────────────────────────────────────────────────────────────►
+│← Wi-Fi STA（DHCP/TCP/TLS 活跃期）→│ ESP-NOW 帧 │ Wi-Fi STA │ ...
+```
+
+- **非活跃期**：Wi-Fi STA 在 DTIM 周期内进入 doze，射频空闲，ESP-NOW 可立即利用
+- **竞争期**：Wi-Fi STA 做大量数据传输（如 TTS 的 HTTPS 下载）时，ESP-NOW 帧可能等待数毫秒才能发出
+- **对本项目的影响**：TTS 播报时（Master 侧 HTTPS 占用 Wi-Fi），Slave 的 HandFrame 仍以 20 Hz 发送，但 Master 侧的实际接收间隔可能有几十毫秒的抖动 → 这正是 `BIMANUAL_SLAVE_STALE_MS = 200ms`（4 帧容忍丢包）阈值设定的依据
+
+#### 3.3.8 与其他通信方案的横向对比
+
+| 维度 | ESP-NOW | Wi-Fi UDP | BLE GATT | 跨板 GPIO |
+|------|---------|-----------|----------|---------|
+| **建连时间** | 无（发即到） | ~50ms（UDP socket） | ~500ms（GATT discover） | 无 |
+| **单包延迟量级** | ms 量级（官方定性） | 数 ms（局域网 UDP） | 数 ms（连接态） | μs 量级 |
+| **单包延迟 P99** | **待 P2 实测** | **待 P2 实测** | — | μs 量级（GPIO ISR） |
+| **最大载荷** | **250 字节** | 65535 字节 | ~244 字节（ATT MTU） | 1 bit/次 |
+| **是否需要 AP** | ❌ 不需要 | ✅ 需要同一局域网 | ❌ 不需要 | ❌ 不需要 |
+| **与 Wi-Fi 共存** | ✅ 同信道共存 | ✅ 本身就是 Wi-Fi | ⚠️ BLE+Wi-Fi 抢射频 | ✅ 无关 |
+| **丢包处理** | 广播无 ACK；单播有 ACK | UDP 无内置重传 | GATT 有重传 | 不丢（电平持续） |
+| **适用场景** | **本项目：低延迟 IoT 控制** | 大数据量传输 | 手机配对场景 | 精确时间同步触发 |
+| **适用于 esp32-s3** | ✅ 完整支持 | ✅ | ✅（BLE 5.0） | ✅ |
+
+**结论**：对于"20 Hz 采样帧、30 字节载荷、双板无 AP 直连"的场景，ESP-NOW 是当前硬件约束下**延迟最低、配置最简**的选择。GPIO 触发线的 μs 级延迟在同步精度上优于 ESP-NOW，但 GPIO 只能传 1 bit（触发信号），无法携带传感器数据，两者互补而非替代：**ESP-NOW 负责数据面，GPIO 负责时间面**（见 §4.6、§4.8.3）。
+
+---
+
+### 3.5 为什么选 ESP-NOW 而不是 WiFi UDP
 - ESP-NOW **链路层直连**，不过 AP；Espressif 官方文档将其定位为"低延迟、适合实时控制"，
   但未公开给出具体的 P99 延迟数字（不同信道占用/距离/发射功率差异很大）。**本白皮书
   不引用任何虚构的"< 数 ms"断言**，真实延迟分布留 P2 双板实测后填入。
@@ -126,7 +292,7 @@
   `esp_now_sync.cpp` 的 `GetEspNowTxCount()` / `GetEspNowTxFailCount()` 已提供这个能力）
 - 与 WiFi STA 共频，无需在双模式间切换（代码 `esp_now_sync.cpp` 已实现 STA + ESP-NOW 共存）
 
-### 3.4 接口（A1 阶段已落地）
+### 3.6 接口（A1 阶段已落地）
 位置：`src/LingxiGlove_Main/esp_now_sync.h`
 
 ```cpp
@@ -149,7 +315,7 @@ void RegisterHandFrameHandler(HandFrameHandler handler);
 
 **编译开关**：`ENABLE_ESPNOW_SYNC=0` 时整套代码零成本被剔除，MVP 单手行为不受影响。
 
-### 3.5 验收
+### 3.7 验收
 | 项 | 已验证？ | 指标 | 来源 |
 |---|---|---|---|
 | 接口编译通过 + 单手场景零影响 | ✅ | `grep ENABLE_ESPNOW_SYNC=0` 路径全 return false | A1 `test_esp_now_sync/` |

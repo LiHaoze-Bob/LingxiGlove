@@ -334,7 +334,11 @@ bool speak(const char* text) {
     // 覆盖绝大多数短句；超长句子截断（不影响 MVP 演示场景）。
     // static 放 .bss 段，避免 loopTask 栈（8KB）溢出。
     static uint8_t s_pcm_accum_buf[60000];
-    static uint8_t s_frame_decode_buf[6144];  // 单帧 base64 解码临时缓冲
+    // s_frame_decode_buf 必须能容纳单帧 base64 解码后的最大 PCM。
+    //   实测 [TTS-SSE-FRAME] b64_len=16350 → 解码后 PCM ≈ 16350×3/4 ≈ 12262 B
+    //   原 6144 B 直接顶到上限，导致每个大帧丢掉 ~6KB PCM → 听不清。
+    //   扩到 16384 B 留 ~33% 余量，覆盖服务端推送更大帧的场景。
+    static uint8_t s_frame_decode_buf[16384];  // 单帧 base64 解码临时缓冲
     size_t accum_len = 0;
     bool stream_finished = false;
 
@@ -379,9 +383,31 @@ bool speak(const char* text) {
             return !stream_finished;
         }
 
+        // [DIAG] 打印 base64 字符串首尾各 16 字节，验证数据是否被破坏。
+        //   合法 base64 字符仅包含 [A-Za-z0-9+/=]，若出现其他字符（如 \\、{、空格）
+        //   说明上游 line_buf / 转义跳过逻辑切错了边界，PCM 必乱码。
+        {
+            char head[17] = {0};
+            char tail[17] = {0};
+            size_t head_n = b64_len < 16 ? b64_len : 16;
+            size_t tail_n = b64_len < 16 ? b64_len : 16;
+            memcpy(head, b64_start, head_n); head[head_n] = '\0';
+            memcpy(tail, b64_start + b64_len - tail_n, tail_n); tail[tail_n] = '\0';
+            DEBUG_LOG("[TTS-SSE-B64] len=%u head=\"%s\" tail=\"%s\"",
+                      (uint32_t)b64_len, head, tail);
+        }
+
         // base64 解码到临时帧缓冲
         size_t pcm_bytes = Base64Decode(b64_start, b64_len,
                                         s_frame_decode_buf, sizeof(s_frame_decode_buf));
+
+        // [DIAG] 每帧 base64 长度 + 解码出的 PCM 字节数 + 解码 buf 容量
+        //   - b64_len 接近 sizeof(s_frame_decode_buf)*4/3 → 解码 buf 太小，PCM 被截
+        //   - pcm_bytes / b64_len 应约等于 0.75 (base64 编码率)
+        DEBUG_LOG("[TTS-SSE-FRAME] b64_len=%u pcm=%u buf=%u",
+                  (uint32_t)b64_len, (uint32_t)pcm_bytes,
+                  (uint32_t)sizeof(s_frame_decode_buf));
+
         if (pcm_bytes == 0) {
             return !stream_finished;
         }

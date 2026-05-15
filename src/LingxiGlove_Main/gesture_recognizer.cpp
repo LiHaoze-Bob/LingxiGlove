@@ -95,3 +95,79 @@ GestureResult RuleBasedRecognizer::recognize(const SensorData& data) {
 GestureRecognizer* createGestureRecognizer() {
     return new RuleBasedRecognizer();
 }
+
+// ============================================================
+// BimanualRuleRecognizer 实现
+// ============================================================
+
+static const char* s_bimanualGestureTexts[] = {
+    "",     // BIMANUAL_GESTURE_NONE
+    "加油", // BIMANUAL_GESTURE_JIAYOU
+};
+
+BimanualRuleRecognizer::BimanualRuleRecognizer()
+    : m_last_detected_(BIMANUAL_GESTURE_NONE)
+    , m_stable_start_ms_(0)
+    , m_in_stable_state_(false) {
+}
+
+void BimanualRuleRecognizer::init() {
+    m_last_detected_   = BIMANUAL_GESTURE_NONE;
+    m_stable_start_ms_ = 0;
+    m_in_stable_state_ = false;
+    DEBUG_PRINTLN("[BimanualGesture] 双手规则识别器初始化完成");
+    DEBUG_PRINTLN("[BimanualGesture] 手势: 双手 pitch > 30° → 加油");
+}
+
+BimanualGestureResult BimanualRuleRecognizer::recognize(const BimanualInput& input) {
+    BimanualGestureResult result = { BIMANUAL_GESTURE_NONE, "", 0.0f };
+
+    // Slave 帧超时检查：帧过期不做双手判断，重置防抖
+    if (input.slave_frame_age_ms > BIMANUAL_SLAVE_STALE_MS) {
+        if (m_last_detected_ != BIMANUAL_GESTURE_NONE) {
+            DEBUG_LOG("[BimanualGesture] Slave 帧超时 (%lums)，重置防抖",
+                      (unsigned long)input.slave_frame_age_ms);
+        }
+        m_last_detected_   = BIMANUAL_GESTURE_NONE;
+        m_stable_start_ms_ = 0;
+        m_in_stable_state_ = false;
+        return result;
+    }
+
+    // 规则判断：双手 pitch 同时超过阈值 → "加油"候选
+    BimanualGestureType detected = BIMANUAL_GESTURE_NONE;
+    if (input.master_pitch > BIMANUAL_PITCH_THRESHOLD_DEG &&
+        input.slave_pitch  > BIMANUAL_PITCH_THRESHOLD_DEG) {
+        detected = BIMANUAL_GESTURE_JIAYOU;
+    }
+
+    // 防抖：候选手势需持续稳定 BIMANUAL_STABLE_MS 才确认
+    unsigned long now = millis();
+    if (detected == m_last_detected_ && detected != BIMANUAL_GESTURE_NONE) {
+        if (!m_in_stable_state_) {
+            if (now - m_stable_start_ms_ >= BIMANUAL_STABLE_MS) {
+                m_in_stable_state_ = true;
+                // 确认手势：置信度取双手 pitch 均值与阈值之比，上限 1.0
+                float avg_pitch = (input.master_pitch + input.slave_pitch) * 0.5f;
+                result.type       = detected;
+                result.text       = s_bimanualGestureTexts[detected];
+                result.confidence = (avg_pitch / 90.0f < 1.0f) ? avg_pitch / 90.0f : 1.0f;
+                DEBUG_LOG("[BimanualGesture] 确认手势: %s  master_pitch=%.1f  slave_pitch=%.1f  age=%lums",
+                          result.text,
+                          (double)input.master_pitch,
+                          (double)input.slave_pitch,
+                          (unsigned long)input.slave_frame_age_ms);
+            }
+        }
+        // 已处于稳定状态：本帧仍持续触发则不重复返回（由调用方的冷却时间管控）
+    } else {
+        // 候选手势变化（或从 NONE 变为有效），重置防抖计时
+        if (detected != m_last_detected_) {
+            m_last_detected_   = detected;
+            m_stable_start_ms_ = now;
+            m_in_stable_state_ = false;
+        }
+    }
+
+    return result;
+}

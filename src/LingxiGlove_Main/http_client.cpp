@@ -176,12 +176,23 @@ int httpPostJsonSse(const char* url,
     //   每轮循环一次性读入所有 available 字节到 s_batch_buf，
     //   再用 memchr 扫 '\n' 分割行，消除了逐字节 delay 的瓶颈。
     //   s_batch_buf 放 .bss 段（static），避免栈溢出。
-    static char s_line_buf[8192];   // 当前行的组装缓冲（最大单行长度）
-    static char s_batch_buf[2048];  // 每次 readBytes 的批量接收缓冲
+    // s_line_buf 必须能容纳单帧 SSE 数据的完整一行：
+    //   实测 Qwen-TTS 单帧 base64 最大约 16350 B + JSON 包装约 80 B = ~16430 B，
+    //   16384 B 不够用（实测 truncate=3，max_line=16383 是被截后的长度）。
+    //   扩到 24576 B（24KB）留 ~50% 余量，单次扩容一次性解决。
+    static char s_line_buf[24576]; // 当前行的组装缓冲（最大单行长度）
+    static char s_batch_buf[2048]; // 每次 readBytes 的批量接收缓冲
     int line_len = 0;
     const unsigned long kReadTimeout = 20000UL;  // 单次流读取总超时
     unsigned long deadline = millis() + kReadTimeout;
     bool stop_early = false;
+
+    // [DIAG] 临时诊断计数器：行长统计 + 截断次数
+    int diag_total_lines       = 0;
+    int diag_data_lines        = 0;
+    int diag_max_line_len      = 0;
+    int diag_truncate_count    = 0;
+    int diag_first_data_len    = -1;
 
     while (!stop_early && millis() < deadline) {
         int avail = stream->available();
@@ -210,7 +221,10 @@ int httpPostJsonSse(const char* url,
                 // 本批没有换行符，全部追加到 line 缓冲
                 int chunk = (int)(end - p);
                 int space = (int)sizeof(s_line_buf) - 1 - line_len;
-                if (chunk > space) chunk = space;  // 溢出截断
+                if (chunk > space) {
+                    diag_truncate_count++;  // [DIAG] 行被截断，行内 base64 必坏
+                    chunk = space;
+                }
                 if (chunk > 0) {
                     memcpy(s_line_buf + line_len, p, chunk);
                     line_len += chunk;
@@ -221,7 +235,10 @@ int httpPostJsonSse(const char* url,
             // 把 [p, nl) 追加到 line 缓冲（nl 指向 '\n'，不含）
             int chunk = (int)(nl - p);
             int space = (int)sizeof(s_line_buf) - 1 - line_len;
-            if (chunk > space) chunk = space;
+            if (chunk > space) {
+                diag_truncate_count++;  // [DIAG] 行被截断
+                chunk = space;
+            }
             if (chunk > 0) {
                 memcpy(s_line_buf + line_len, p, chunk);
                 line_len += chunk;
@@ -234,6 +251,14 @@ int httpPostJsonSse(const char* url,
             s_line_buf[line_len] = '\0';
 
             if (line_len > 0) {
+                // [DIAG] 行长统计
+                diag_total_lines++;
+                if (line_len > diag_max_line_len) diag_max_line_len = line_len;
+                if (line_len > 5 && memcmp(s_line_buf, "data:", 5) == 0) {
+                    diag_data_lines++;
+                    if (diag_first_data_len < 0) diag_first_data_len = line_len;
+                }
+
                 String line_str(s_line_buf);
                 if (!onLine(line_str)) {
                     stop_early = true;
@@ -245,6 +270,11 @@ int httpPostJsonSse(const char* url,
             line_len = 0;
         }
     }
+
+    // [DIAG] 行解析诊断汇总：能看出 base64 是否被 s_line_buf 截断
+    DEBUG_LOG("[HTTP-SSE-DIAG] lines=%d data_lines=%d max_line=%d first_data=%d truncate=%d (buf=%d)",
+              diag_total_lines, diag_data_lines, diag_max_line_len,
+              diag_first_data_len, diag_truncate_count, (int)sizeof(s_line_buf));
 
     http.end();
     return http_code;

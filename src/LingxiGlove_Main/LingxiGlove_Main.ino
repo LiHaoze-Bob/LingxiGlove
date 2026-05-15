@@ -16,10 +16,14 @@
 #include "motion_detector.h"
 #include "calibration.h"
 #include "local_tts_fallback.h"
+#include "esp_now_sync.h"
 
 // LLM 客户端：除 ENABLE_LLM_TEST 启动自检外，主循环里的 LLM 改写层
 // （rewriteGestureToSentence）与串口命令 'l' 都需要它，统一无条件 include。
 #include "llm_client.h"
+
+// math.h 用于 BimanualInput 的 pitch 换算（atan2f）
+#include <math.h>
 
 // ------------------- 运行模式 -------------------
 enum RunMode {
@@ -62,6 +66,59 @@ static RunMode        g_runMode = MODE_RECOGNIZE;
 #if ENABLE_MOTION_GATING
 static MotionState    g_lastMotionState = MOTION_STATE_STILL;
 #endif
+
+// ============================================================
+// ESP-NOW 双手协同状态（ENABLE_ESPNOW_SYNC=1 时生效）
+// ============================================================
+#if ENABLE_ESPNOW_SYNC
+
+#if ESPNOW_ROLE == 0  // MASTER
+
+// 最新收到的 Slave 帧及其接收时刻（由 ESP-NOW 接收回调写入，主循环读取）
+// 注意：ESP-NOW 回调在系统任务上下文中执行，与 loop() 并发。
+// 此处用 volatile 修饰接收时刻，防止编译器优化掉对 g_slave_frame_rx_ms 的读取。
+// HandFrame 本身的写入是单次 memcpy（32 字节对齐），ESP32 单核写不会被主循环
+// 中途看到半段数据；双核场景下最坏情况是读到"旧帧+新时刻"组合，对本阶段
+// 验证 Demo 可接受（不影响安全，只影响一帧判断延迟）。
+static HandFrame         g_slave_frame;
+static volatile uint32_t g_slave_frame_rx_ms = 0;  // 0 表示还未收到任何帧
+static bool              g_slave_frame_valid  = false;
+
+// 双手规则识别器（在 MASTER 上实例化）
+static BimanualRuleRecognizer g_bimanual_recognizer;
+
+// 双手识别冷却计时（与单手 TTS_COOLDOWN_MS 共用 g_lastAnnounceTime，
+// 避免单手和双手识别结果互相干扰播报节奏）
+// 无需独立变量，由 doRecognizeStep 内的 g_lastAnnounceTime 统一管控。
+
+/**
+ * @brief 将 HandFrame 的 int16 原始 ax/az 换算为 pitch 角（度）
+ *
+ * MPU6050 FullScale ±2g 时 1 LSB = 1/16384 g。
+ * pitch = atan2(-ax, az) × (180/π)
+ * 负号约定：与 sensor_manager.cpp 中 computeOrientation 的符号保持一致，
+ * 手背朝上/掌心向下时 pitch 为负；手掌朝上时 pitch 为正。
+ */
+static float HandFrameToPitch(const HandFrame& frame) {
+    float ax_g = (float)frame.ax / MPU6050_ACCEL_SCALE_G;
+    float az_g = (float)frame.az / MPU6050_ACCEL_SCALE_G;
+    return atan2f(-ax_g, az_g) * (180.0f / (float)M_PI);
+}
+
+/**
+ * @brief ESP-NOW 接收回调（系统任务上下文）
+ *
+ * 严禁在此函数内做任何阻塞操作（Serial.print 除外的 I/O、delay 等）。
+ * 仅做帧缓冲写入和时刻记录。
+ */
+static void OnSlaveHandFrame(const HandFrame& frame, const uint8_t /*mac*/[6]) {
+    memcpy(&g_slave_frame, &frame, sizeof(HandFrame));
+    g_slave_frame_rx_ms = (uint32_t)millis();
+    g_slave_frame_valid = true;
+}
+
+#endif  // ESPNOW_ROLE == 0 (MASTER)
+#endif  // ENABLE_ESPNOW_SYNC
 
 // ============================================================
 // setup() - 系统初始化
@@ -107,6 +164,26 @@ void setup() {
     }
     DEBUG_LOG("[系统] 手势识别器就绪: %s", g_recognizer->getName());
 
+// ============================================================
+// SLAVE 固件从此处分叉：仅初始化 MPU6050 + ESP-NOW，然后进入独立主循环
+// MASTER 固件继续执行后续 I2S / WiFi / TTS 初始化
+// ============================================================
+#if ENABLE_ESPNOW_SYNC && (ESPNOW_ROLE == 1)  // ---------- SLAVE 启动路径 ----------
+
+    // SLAVE 不需要 I2S / WiFi / TTS / LLM，setup() 在此处完成并返回。
+    // loop() 中会走 SLAVE 的采样→发帧路径，与 MASTER 路径互斥（同一宏控制）。
+    DEBUG_PRINTLN("[Slave] 正在初始化 ESP-NOW...");
+    // SLAVE 用广播 MAC 发帧，无需提前知道 MASTER 地址
+    if (!InitEspNowSync(ESPNOW_ROLE_SLAVE, nullptr)) {
+        DEBUG_PRINTLN("[Slave] 错误: ESP-NOW 初始化失败，系统停止");
+        haltWithError();
+    }
+    DEBUG_PRINTLN("[Slave] ESP-NOW 初始化成功，开始广播 HandFrame...");
+    g_systemReady = true;
+    return;  // SLAVE setup() 到此结束
+
+#else  // ---------- MASTER 启动路径（含非 ESPNOW 的单手 MVP）----------
+
     // ---------- 3. 初始化 I2S 音频 ----------
     DEBUG_PRINTLN("[系统] 正在初始化 I2S 音频...");
     if (!initTTS()) {
@@ -130,6 +207,36 @@ void setup() {
             delay(5000);
         }
     }
+    // WiFi 连上后信道已确定，MASTER 现在才初始化 ESP-NOW，
+    // 确保 ESP-NOW 与 WiFi 使用同一信道（ESP-NOW channel=0 表示跟随当前 WiFi 信道）
+#if ENABLE_ESPNOW_SYNC  // MASTER 路径下 ESPNOW_ROLE == 0
+    DEBUG_PRINTLN("[Master] 正在初始化 ESP-NOW...");
+    if (!InitEspNowSync(ESPNOW_ROLE_MASTER, nullptr)) {
+        // MASTER 要求 peer_mac 非 nullptr，但此处先以广播 peer 启动，
+        // Slave 广播帧到达后回调会自然触发。
+        // InitEspNowSync 对 MASTER+nullptr 返回 false，改用强制广播模式：
+        // 注册广播 peer，让 MASTER 也能收到 Slave 的广播帧。
+        // ESP-NOW 接收不依赖 peer 注册，只需注册 recv_cb 即可；
+        // 此处绕过 InitEspNowSync 的 MASTER 校验，直接底层注册接收回调。
+        // ——但为了复用已有接口，实际做法：MASTER 以 SLAVE 角色初始化 ESP-NOW
+        //   只为注册接收回调，然后 RegisterHandFrameHandler 注入自己的处理器。
+        // 更简洁：修改策略——MASTER 不发帧，只收帧，peer 注册可以延迟到
+        //   收到第一帧 Slave MAC 后再添加。此处仅调 esp_now_init + register_recv_cb。
+        // 由于 InitEspNowSync 封装太严，直接裁剪：将 ESPNOW_ROLE_SLAVE 传入，
+        // 让其注册广播 peer（SLAVE 模式允许 nullptr），这样 MASTER 就能收到广播帧。
+        if (!InitEspNowSync(ESPNOW_ROLE_SLAVE, nullptr)) {
+            DEBUG_PRINTLN("[Master] 警告: ESP-NOW 初始化失败，双手识别不可用");
+        } else {
+            RegisterHandFrameHandler(OnSlaveHandFrame);
+            g_bimanual_recognizer.init();
+            DEBUG_PRINTLN("[Master] ESP-NOW 初始化成功（接收模式）");
+        }
+    } else {
+        RegisterHandFrameHandler(OnSlaveHandFrame);
+        g_bimanual_recognizer.init();
+        DEBUG_PRINTLN("[Master] ESP-NOW 初始化成功，等待 Slave 帧...");
+    }
+#endif  // ENABLE_ESPNOW_SYNC
 
 #if ENABLE_LLM_TEST
     // ---------- 5. 可选：测试 LLM 连通性 ----------
@@ -145,9 +252,14 @@ void setup() {
     // ---------- 系统就绪 ----------
     g_systemReady = true;
     DEBUG_PRINTLN("\n============================================");
-    DEBUG_PRINTLN("  MVP 链路就绪，开始手势识别...");
+    DEBUG_PRINTLN("  链路就绪，开始手势识别...");
     DEBUG_PRINTLN("============================================");
+#if ENABLE_ESPNOW_SYNC
+    DEBUG_PRINTLN("  [双手模式] Master: 单手手势 + 双手协同（加油）");
+    DEBUG_PRINTLN("  双手协同：双手同时抬起（pitch > 30°）持续 0.5s → 加油");
+#else
     DEBUG_PRINTLN("  支持手势: 朝上=你好 | 朝下=谢谢 | 左倾=再见 | 右倾=是 | 竖直=不");
+#endif
     printHelp();
     DEBUG_PRINTLN("============================================\n");
 
@@ -160,6 +272,8 @@ void setup() {
             speak("灵犀手套已就绪");
         }
     }
+
+#endif  // MASTER 启动路径结束
 }
 
 // ============================================================
@@ -190,9 +304,53 @@ void loop() {
     SensorData data;
     if (!readSensors(data)) {
         DEBUG_PRINTLN("[系统] 传感器读取失败");
+#if !(ENABLE_ESPNOW_SYNC && (ESPNOW_ROLE == 1))
         checkWiFiConnection(WIFI_SSID, WIFI_PASSWORD);
+#endif
         return;
     }
+
+// ============================================================
+// SLAVE 主循环：采样 → 打包 HandFrame → 广播发出，不走 WiFi/TTS
+// ============================================================
+#if ENABLE_ESPNOW_SYNC && (ESPNOW_ROLE == 1)
+
+    {
+        static uint16_t s_slave_seq = 0;
+        HandFrame frame;
+        memset(&frame, 0, sizeof(frame));
+        // master_timestamp_ms 由 MASTER 打戳；SLAVE 端始终填 0
+        frame.master_timestamp_ms = 0;
+        frame.seq_no              = s_slave_seq++;
+        // SensorData.accelX 是物理值（g），反推 int16 LSB = value × 16384
+        frame.ax = (int16_t)(data.accelX * MPU6050_ACCEL_SCALE_G);
+        frame.ay = (int16_t)(data.accelY * MPU6050_ACCEL_SCALE_G);
+        frame.az = (int16_t)(data.accelZ * MPU6050_ACCEL_SCALE_G);
+        // gyroX 是物理值（deg/s），陀螺 ±250°/s full-scale → 1LSB = 1/131 °/s
+        frame.gx = (int16_t)(data.gyroX * 131.0f);
+        frame.gy = (int16_t)(data.gyroY * 131.0f);
+        frame.gz = (int16_t)(data.gyroZ * 131.0f);
+#if ENABLE_FLEX_SENSORS
+        for (uint8_t ch = 0; ch < FLEX_CHANNEL_COUNT; ch++) {
+            frame.flex[ch] = data.flex[ch];
+        }
+#endif
+        if (!SendHandFrame(frame)) {
+            DEBUG_PRINTLN("[Slave] 发帧失败（ESP-NOW 入队错误）");
+        } else {
+            // 每 50 帧打印一次统计，避免刷屏
+            static uint16_t s_print_counter = 0;
+            if (++s_print_counter >= 50) {
+                s_print_counter = 0;
+                DEBUG_LOG("[Slave] 已发 %u 帧  pitch=%.1f  seq=%u",
+                          (unsigned)GetEspNowTxCount(),
+                          (double)data.pitch,
+                          (unsigned)frame.seq_no);
+            }
+        }
+    }
+
+#else  // MASTER 主循环（含非 ESPNOW 的单手 MVP）
 
     // ---------- 2. 分模式处理 ----------
     // CAPTURE 与 FINGER_SPELLING 共享 CSV 输出通路；两者的数据差异仅体现在
@@ -205,6 +363,8 @@ void loop() {
 
     // ---------- 3. 维护 WiFi 连接 ----------
     checkWiFiConnection(WIFI_SSID, WIFI_PASSWORD);
+
+#endif  // MASTER 主循环结束
 }
 
 // ============================================================
@@ -305,6 +465,72 @@ static void doRecognizeStep(const SensorData& data, unsigned long now) {
     if (result.type == GESTURE_NONE) {
         g_lastAnnouncedGesture = GESTURE_NONE;
     }
+
+// ============================================================
+// Master 双手协同识别（ENABLE_ESPNOW_SYNC=1 && ESPNOW_ROLE=0）
+// 在单手识别之后单独运行；两者共用 g_lastAnnounceTime 冷却计时，
+// 防止单手和双手结果在同一冷却窗口内互相覆盖。
+// ============================================================
+#if ENABLE_ESPNOW_SYNC && (ESPNOW_ROLE == 0)
+    {
+        // 计算 Slave 帧的"年龄"（距收到时刻的毫秒数）
+        unsigned long slave_age_ms = 0;
+        if (g_slave_frame_valid) {
+            uint32_t rx_ms = g_slave_frame_rx_ms;  // 读一次 volatile，避免多次读取不一致
+            slave_age_ms = (now >= rx_ms) ? (now - rx_ms) : 0;
+        } else {
+            // 从未收到过 Slave 帧，直接设为超出阈值，让识别器立即返回 NONE
+            slave_age_ms = BIMANUAL_SLAVE_STALE_MS + 1;
+        }
+
+        // 从 Master 当前帧 SensorData 换算 pitch（与 SensorData.pitch 一致，直接复用）
+        float master_pitch = data.pitch;
+
+        // 从最新 Slave HandFrame 换算 pitch
+        float slave_pitch = HandFrameToPitch(g_slave_frame);
+
+        BimanualInput bi_input;
+        bi_input.master_pitch      = master_pitch;
+        bi_input.slave_pitch       = slave_pitch;
+        bi_input.slave_frame_age_ms = slave_age_ms;
+
+        BimanualGestureResult bi_result = g_bimanual_recognizer.recognize(bi_input);
+
+        // 每 50 次循环打印一次双手调试信息
+        static uint8_t s_bi_debug_counter = 0;
+        if (++s_bi_debug_counter >= 50) {
+            s_bi_debug_counter = 0;
+            DEBUG_LOG("[双手] master_pitch=%.1f  slave_pitch=%.1f  age=%lums  rx=%u",
+                      (double)master_pitch,
+                      (double)slave_pitch,
+                      (unsigned long)slave_age_ms,
+                      (unsigned)GetEspNowRxCount());
+        }
+
+        if (bi_result.type != BIMANUAL_GESTURE_NONE &&
+            now - g_lastAnnounceTime > (unsigned long)TTS_COOLDOWN_MS) {
+
+            DEBUG_LOG("\n[双手识别] 检测到: %s (置信度: %.2f)",
+                      bi_result.text, (double)bi_result.confidence);
+
+            // 双手识别直接走 TTS，不经过 LLM 改写（词义已足够完整）
+            bool spoken = speak(bi_result.text);
+            if (!spoken) {
+                if (PlayOfflineVoice(bi_result.text)) {
+                    spoken = true;
+                }
+            }
+            if (!spoken) {
+                DEBUG_PRINTLN("[系统] 双手手势 TTS 全部失败");
+            }
+
+            // 使用与单手相同的冷却计时，避免重复播报
+            g_lastAnnounceTime = now;
+            // 重置单手手势复位状态，防止双手触发后立即触发同一单手手势
+            g_lastAnnouncedGesture = GESTURE_NONE;
+        }
+    }
+#endif  // ENABLE_ESPNOW_SYNC && ESPNOW_ROLE==0
 }
 
 // ============================================================

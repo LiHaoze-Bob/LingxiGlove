@@ -163,14 +163,43 @@
     "请把它改写成一句最自然、最简短的中文口语（不超过 25 字）。" \
     "只输出这句话本身，不要任何解释、前缀、引号、括号或换行。"
 
-// ------------------- ESP-NOW 双手同步（A 阶段接口预埋） -------------------
-// 目的：为"双手手语翻译"方案预留底层通信层。启用后，从手（SLAVE）通过
+// ------------------- ESP-NOW 双手同步 -------------------
+// 目的：为"双手手语翻译"方案提供底层通信层。启用后，从手（SLAVE）通过
 //       ESP-NOW 广播 HandFrame 给主手（MASTER），主手做特征拼接与识别。
-// 0 = 关闭（默认，MVP 单手行为不受影响，esp_now_sync.* 编译为空 stub）
-// 1 = 启用（会引入 <esp_now.h> <WiFi.h> 依赖，并占用 WiFi 模块）
-// 注意：与现有在线 TTS / LLM 功能共用同一个 WiFi 模块，启用前需评估 Wi-Fi
-//       与 ESP-NOW 混用对带宽/延迟的影响（需同信道）。
-#define ENABLE_ESPNOW_SYNC      0
+// 0 = 关闭（MVP 单手行为不受影响，esp_now_sync.* 编译为空 stub）
+// 1 = 启用（会引入 <esp_now.h> <WiFi.h> 依赖）
+// 注意：与在线 TTS / LLM 共用同一 WiFi 模块，两块板须在同一 WiFi 信道。
+//       MASTER 连 WiFi AP 后信道由 AP 决定，SLAVE 将跟随同一信道自动配对。
+#define ENABLE_ESPNOW_SYNC      1
+
+// ESPNOW_ROLE：烧录时区分 MASTER / SLAVE 固件的唯一宏
+//   0 = MASTER（右手）：连 WiFi + TTS 播报 + 收 Slave 帧 + 双手识别
+//   1 = SLAVE （左手）：仅 ESP-NOW 广播 HandFrame，不走 WiFi / TTS
+// 烧录 SLAVE 时把此宏改为 1，其余配置不变。
+#define ESPNOW_ROLE             0   // 0=MASTER  1=SLAVE
+
+// ------------------- 双手协同识别阈值 -------------------
+// 以下阈值仅在 ENABLE_ESPNOW_SYNC=1 && ESPNOW_ROLE=0 (MASTER) 时生效。
+//
+// BIMANUAL_SLAVE_STALE_MS：Slave 帧超过此时间未刷新即视为"失联/超时"，
+//   双手识别器不输出结果，避免用过期数据做判定。
+//   50ms 帧周期下 200ms ≈ 4 帧容忍丢包，实测可按信号质量调整。
+#define BIMANUAL_SLAVE_STALE_MS     200
+
+// BIMANUAL_PITCH_THRESHOLD_DEG：双手 pitch 需同时超过此阈值才进入"加油"候选。
+//   30° 远小于单手识别的 45°，给非标准姿势留裕量；
+//   具体动作"双手上抬握拳"时 pitch 典型值 40°–70°，阈值 30° 有充足余量。
+#define BIMANUAL_PITCH_THRESHOLD_DEG  30.0f
+
+// BIMANUAL_STABLE_MS：双手同时满足条件需持续此时间才触发，防抖用。
+//   与单手 GESTURE_STABLE_MS(500ms) 保持一致，可独立调整。
+#define BIMANUAL_STABLE_MS          500
+
+// MPU6050 加速度/陀螺仪原始值 → pitch 角度换算比例（FullScale ±2g, 16384 LSB/g）
+// 用于 HandFrame 里的 int16 原始值重建 pitch（MASTER 侧换算 Slave 的原始帧）：
+//   pitch_deg = atan2(-ax_raw / 16384.0, az_raw / 16384.0) * (180 / PI)
+// 此常量由 HandFrame 的 IMU 量程决定，不随实测而变化。
+#define MPU6050_ACCEL_SCALE_G       16384.0f  // LSB per g (±2g full scale)
 
 // ------------------- 调试开关 -------------------
 // 设为 1 开启详细日志，设为 0 关闭
