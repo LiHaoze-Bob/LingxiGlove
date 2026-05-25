@@ -241,7 +241,10 @@ String chatLLM(const char* prompt) {
         return "[错误] 提示词为空";
     }
 
-    DEBUG_LOG("[LLM] 用户输入: %s", prompt);
+    // prompt 可能超过 DEBUG_LOG 的 256B 栈缓冲，拆成标签 + 原文两段输出
+    DEBUG_LOG("[LLM] 用户输入 ↓");
+    Serial.write((const uint8_t*)prompt, strlen(prompt));
+    Serial.write('\n');
 
 #ifdef LLM_PROVIDER_BAIDU
     String reply = chatBaidu(prompt);

@@ -1,4 +1,4 @@
-# 灵犀手套 SignLingua
+# 灵犀手套 Lingxi
 
 > 基于 ESP32-S3 的智能手语翻译手套 —— 为听障人士打通「手语 → 语音」实时沟通通道。
 
@@ -17,22 +17,28 @@
 - **算法**：规则识别 (MVP) → 1D CNN on Edge Impulse (V1) → 双手同步（ESP-NOW + 声学 TDOA）
 - **云端**：阿里 DashScope — Qwen-LLM 自然句改写 · Qwen-TTS 中文语音合成
 
-详细设计与开发计划见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) 和 [`doc/SOLUTION_REVIEW.md`](doc/SOLUTION_REVIEW.md)。
+详细设计与开发计划见 [`doc/SDD_SPEC.md`](doc/SDD_SPEC.md)（设计契约总纲，配套 [`spec.yaml`](spec.yaml)）、[`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md)（开发指南）和 [`doc/SOLUTION_REVIEW.md`](doc/SOLUTION_REVIEW.md)（方案 Review）。
 
 ---
 
 ## 目录结构
 
 ```
-SignLingua/
+Lingxi/
 ├── README.md                        ← 本文件（仓库入口）
 ├── .gitignore                       ← 忽略 secrets.h / .DS_Store / build 产物
+├── spec.yaml                        ← 产品规格契约（机器可读，与 SDD_SPEC.md 配套）
 ├── doc/                             ← 所有文档
-│   ├── DEVELOPMENT.md               ← 开发指南（主文档）
-│   ├── SOLUTION_REVIEW.md           ← 整体方案 Review
+│   ├── images/                      ← 架构图 / 数据流图 (PNG + HTML)
+│   ├── SDD_SPEC.md                  ← 设计契约总纲（架构 / 模块 / 阶段 / 测试矩阵）
+│   ├── DEVELOPMENT.md               ← 开发指南（接线 / 烧录 / 串口命令）
+│   ├── SOLUTION_REVIEW.md           ← 整体方案 Review + 答辩素材
 │   ├── DOUBLE_HAND_DESIGN.md        ← 双手手语翻译白皮书
+│   ├── PERFORMANCE_OPTIMIZATION.md  ← 性能与资源预算
+│   ├── USER_GUIDE.md                ← 用户使用指南
 │   ├── Edge_Impulse_ESP32_S3_训练指南.md
-│   └── 灵犀手套SignLingua_项目招募说明书.md
+│   ├── 架构图_灵犀手套Lingxi.html
+│   └── acoustic_tdoa_simulation_results.md + .csv
 ├── src/
 │   ├── LingxiGlove_Main/            ← Arduino 主项目（sketch）
 │   │   ├── LingxiGlove_Main.ino     ← 入口
@@ -103,7 +109,7 @@ cp secrets.example.h secrets.h
 | V1.5 | 双手同步（ESP-NOW + 声学 TDOA） | 📐 方案确定，待硬件 |
 | V2.0 | 手机 App 代理模式 · 离线模型下沉 | 🗓️ 规划中 |
 
-详细甘特图见 `doc/甘特图_灵犀手套SignLingua.html`。
+详细路线图见 `doc/DEVELOPMENT.md §10` 与 `doc/SDD_SPEC.md §7`。
 
 ---
 
@@ -117,6 +123,9 @@ cp secrets.example.h secrets.h
 
 ---
 
+## License
+
+MIT
 ## License
 
 MIT

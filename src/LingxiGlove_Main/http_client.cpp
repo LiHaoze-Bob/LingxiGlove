@@ -46,7 +46,8 @@ static bool BeginHttps(HTTPClient& http, WiFiClientSecure& secure_client, const 
     return http.begin(secure_client, url);
 }
 
-String httpPostJson(const char* url, const String& jsonPayload, const char* authHeader) {
+String httpPostJson(const char* url, const String& jsonPayload,
+                    const char* authHeader, uint16_t timeout_ms) {
     if (url == nullptr || url[0] == '\0') {
         DEBUG_PRINTLN("[HTTP] 错误: url 为空");
         return String();
@@ -66,7 +67,9 @@ String httpPostJson(const char* url, const String& jsonPayload, const char* auth
         return String();
     }
 
-    http.setTimeout(kHttpTimeoutMs);
+    // timeout_ms == 0 表示使用默认值
+    uint16_t effective_timeout = (timeout_ms > 0) ? timeout_ms : kHttpTimeoutMs;
+    http.setTimeout(effective_timeout);
     http.setConnectTimeout(kHttpTimeoutMs);
     http.addHeader("Content-Type", "application/json");
 
@@ -321,6 +324,92 @@ String httpGet(const char* url, const char* authHeader) {
 
     http.end();
     return response;
+}
+
+size_t httpGetToBuffer(const char* url, uint8_t* dst, size_t dst_size,
+                       const char* authHeader) {
+    if (url == nullptr || url[0] == '\0') {
+        DEBUG_PRINTLN("[HTTP-DL] 错误: url 为空");
+        return 0;
+    }
+    if (dst == nullptr || dst_size == 0) {
+        DEBUG_PRINTLN("[HTTP-DL] 错误: 目标缓冲区无效");
+        return 0;
+    }
+
+    HTTPClient http;
+    WiFiClientSecure secure_client;
+
+    bool begin_ok = false;
+    if (IsHttpsUrl(url)) {
+        begin_ok = BeginHttps(http, secure_client, url);
+    } else {
+        begin_ok = http.begin(url);
+    }
+    if (!begin_ok) {
+        DEBUG_LOG("[HTTP-DL] begin 失败: %.80s...", url);
+        return 0;
+    }
+
+    // WAV 文件下载可能较大（~192KB），给足超时
+    http.setTimeout(30000);
+    http.setConnectTimeout(kHttpTimeoutMs);
+
+    if (authHeader != nullptr) {
+        http.addHeader("Authorization", authHeader);
+    }
+
+    DEBUG_LOG("[HTTP-DL] GET %.80s...", url);
+
+    int http_code = http.GET();
+    if (http_code <= 0) {
+        DEBUG_LOG("[HTTP-DL] 请求失败: %s", http.errorToString(http_code).c_str());
+        http.end();
+        return 0;
+    }
+    if (http_code != HTTP_CODE_OK) {
+        DEBUG_LOG("[HTTP-DL] 非 200 状态码: %d", http_code);
+        http.end();
+        return 0;
+    }
+
+    int content_length = http.getSize();
+    DEBUG_LOG("[HTTP-DL] Content-Length: %d", content_length);
+
+    WiFiClient* stream = http.getStreamPtr();
+    if (stream == nullptr) {
+        DEBUG_PRINTLN("[HTTP-DL] 无法获取流指针");
+        http.end();
+        return 0;
+    }
+
+    // 流式读取到目标缓冲区，避免一次性 getString() 的额外拷贝
+    size_t total_read = 0;
+    unsigned long deadline = millis() + 30000UL;
+
+    while (total_read < dst_size && millis() < deadline) {
+        int avail = stream->available();
+        if (avail <= 0) {
+            if (!http.connected()) break;
+            delay(1);
+            continue;
+        }
+        // 续期：只要还在收数据就延长超时
+        deadline = millis() + 10000UL;
+
+        size_t remaining = dst_size - total_read;
+        size_t to_read = (size_t)avail < remaining ? (size_t)avail : remaining;
+        // 单次最多读 4KB，避免长时间阻塞
+        if (to_read > 4096) to_read = 4096;
+
+        int got = (int)stream->readBytes(dst + total_read, to_read);
+        if (got <= 0) break;
+        total_read += (size_t)got;
+    }
+
+    http.end();
+    DEBUG_LOG("[HTTP-DL] 下载完成: %u B", (uint32_t)total_read);
+    return total_read;
 }
 
 String urlEncode(const char* str) {

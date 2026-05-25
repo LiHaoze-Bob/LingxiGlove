@@ -10,13 +10,30 @@
 // 初始化I2S音频输出
 bool initTTS();
 
-// 使用百度TTS将文本转为语音并播放
-// text: 要朗读的中文文本（建议不超过100字）
+// 云端 TTS 合成并播放（支持 LittleFS 本地缓存加速）
+// text:       要朗读的中文文本（建议不超过100字）
+// cache_key:  缓存索引键（可选）。非空时用此键查找/写入缓存，
+//             解决 LLM 改写不稳定（同一手势词每次改写结果不同）导致
+//             缓存永远无法命中的问题。典型用法：传入原始手势词。
+//             为 nullptr 时退化为以 text 本身作为缓存键。
+// cache_only: true 时仅查本地缓存，命中则播放并返回 true，
+//             未命中直接返回 false（不走云端合成）。
+//             典型用法：在 LLM 改写之前先尝试缓存播放，命中则跳过 LLM 调用，
+//             延迟从 3-5 秒降至 <100ms。
 // 返回: true=播放成功, false=播放失败
-bool speak(const char* text);
+bool speak(const char* text, const char* cache_key = nullptr, bool cache_only = false);
 
 // 播放测试音（正弦波）
 void playTestTone(int freq, int durationMs);
+
+/**
+ * @brief 清除 LittleFS 上的 TTS 缓存文件。
+ *
+ * 删除 /tts_cache/ 目录下所有 .wav 文件。
+ * 下次 speak() 调用时会重新从云端合成并写入缓存。
+ * TTS_CACHE_ENABLE=0 时本函数为空操作。
+ */
+void clearTtsCache();
 
 /**
  * @brief 直接播放内存中的 int16 单声道 PCM 数据（离线兜底/声学 POC 等场景使用）。

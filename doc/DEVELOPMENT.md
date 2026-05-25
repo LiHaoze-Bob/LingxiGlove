@@ -13,7 +13,7 @@
 1. **手势采集**：通过 MPU6050（6轴惯性传感器）+ 5路弯曲传感器采集手部姿态数据
 2. **手势识别**：利用 Edge Impulse 训练的机器学习模型识别手语手势
 3. **文本转换**：将识别结果映射为对应的中文文本
-4. **语音合成**：调用云端 TTS（百度语音合成）将文本转为语音
+4. **语音合成**：调用云端 TTS（阿里 Qwen-TTS）将文本转为语音
 5. **音频播放**：通过 I2S 接口驱动 MAX98357A DAC 模块播放语音
 
 ### 1.3 技术栈
@@ -26,7 +26,7 @@
 | 音频 | MAX98357A I2S DAC + 喇叭 |
 | 通信 | WiFi 802.11 b/g/n |
 | 云端 LLM | 百度 ERNIE / 阿里通义千问 (DashScope) |
-| 云端 TTS | 百度语音合成 API |
+| 云端 TTS | 阿里 Qwen-TTS (DashScope) |
 | 模型训练 | Edge Impulse Studio |
 
 ---
@@ -91,11 +91,14 @@
 │  sensor_manager.h/cpp   │  gesture_recognizer.h/cpp  │
 │  传感器数据采集          │  手势识别引擎（可替换）      │
 ├─────────────────────────────────────────┤
+│  gesture_arbitrator.h/cpp               │
+│  手势仲裁层（单手/双手统一决策）          │
+├─────────────────────────────────────────┤
 │  wifi_manager.h/cpp  │  http_client.h/cpp  │  llm_client.h/cpp  │
 │  WiFi连接管理         │  HTTP请求封装        │  LLM对话接口       │
 ├─────────────────────────────────────────┤
 │         tts_player.h/cpp                │
-│    I2S音频初始化 + 百度TTS流式播放       │
+│    I2S音频初始化 + Qwen-TTS + LittleFS缓存  │
 ├─────────────────────────────────────────┤
 │              config.h                   │
 │    全局配置：WiFi/API/I2S引脚/调试开关   │
@@ -111,16 +114,19 @@ MPU6050 + 弯曲传感器
   sensor_manager (读取原始数据)
          │
          ▼
-  gesture_recognizer (识别手势)
+  motion_detector (动作/静止门控)
          │
          ▼
-  文本结果 (如 "你好")
-         │
+  gesture_recognizer (单手/双手分别识别手势)
+         │  GestureCandidate{source, text, confidence}
          ▼
-  tts_player.speak(text) ──→ 百度TTS API
+  gesture_arbitrator (统一决策：双手优先、确认窗口、冷却)
+         │  ArbitratedGesture{should_announce, text}
+         ▼
+  tts_player.speak(text) ──→ Qwen-TTS (DashScope)
          │                           │
          ▼                           ▼
-    I2S 流式播放  ←───────  PCM-16k 音频流
+    I2S 播放  ←──────  LittleFS 缓存 / 云端 WAV
 ```
 
 ### 3.3 扩展性设计
@@ -144,14 +150,22 @@ public:
 
 ### 4.1 已实现模块（当前状态）
 
-- [x] `wifi_manager` — WiFi 连接与断线重连
-- [x] `http_client` — HTTP GET/POST 封装 + URL 编码
-- [x] `llm_client` — 百度 ERNIE / 阿里通义千问 双提供商支持
-- [x] `tts_player` — I2S 初始化 + 百度 TTS 流式播放
-- [x] `config.h` — 全局配置中心
 - [x] `sensor_manager` — MPU6050 初始化与数据读取（Wire 手动驱动 + 姿态解算 + 5 路弯曲传感器 ADC 采集，由 `ENABLE_FLEX_SENSORS` 条件编译控制）
-- [x] `gesture_recognizer` — 规则识别器：基于俯仰角/横滚角判定手势 + 500ms 防抖
-- [x] `LingxiGlove_Main.ino` — 主循环：采集 → 识别 → TTS 播报（含 WiFi 守护 + 串口采集模式）
+- [x] `motion_detector` — 动作/静止门控（加速度方差 + 陀螺仪模长双阈值迟滞状态机）
+- [x] `calibration` — IMU 零偏 + Flex 量程个体校准，NVS 持久化，启动自动加载
+- [x] `gesture_recognizer` — 规则识别器：RuleBasedRecognizer（俯仰/横滚 + 500ms 防抖）+ BimanualRuleRecognizer（双手协同规则）
+- [x] `gesture_arbitrator` — 手势仲裁层（方案C）：单手/双手统一决策，双手优先抑制单手，确认窗口 200ms，冷却 2s
+- [x] `esp_now_sync` — 双手 ESP-NOW 同步（HandFrame 30B，MASTER/SLAVE 角色）
+- [x] `nvs_config` — 运行时角色/对端 MAC/WiFi 凭证持久化（NVS）
+- [x] `wifi_manager` — WiFi 连接与断线重连
+- [x] `http_client` — HTTPS GET/POST 封装 + SSE 流式 + URL 编码
+- [x] `llm_client` — 阿里通义千问 / 百度 ERNIE 双提供商支持；自然句改写
+- [x] `tts_player` — Qwen-TTS 云端合成 + LittleFS 缓存 + I2S 播放 + 离线 PCM 回退
+- [x] `local_tts_fallback` — TTS 失败时按 label 匹配离线 PCM；空表降级蜂鸣
+- [x] `offline_voice_pcm` — 离线语音 PCM 表（由 `tools/gen_offline_voice_pcm.py` 生成）
+- [x] `accuracy_test` — 现场识别准确率统计（混淆矩阵 + LittleFS CSV 日志 + `test` 串口命令族）
+- [x] `config.h` — 全局配置中心（特性开关、阈值、引脚定义）
+- [x] `LingxiGlove_Main.ino` — 主循环：采集 → 门控 → 识别 → 仲裁 → TTS 播报（含 WiFi 守护 + 串口命令分发）
 
 ### 4.2 MVP 增量优化项（纯软件迭代，已完成）
 
@@ -238,25 +252,22 @@ loop():
 
 ### 6.2 API 配置
 
-编辑 `config.h`，填入以下内容：
+首次使用需从模板创建密钥文件：
 
-```cpp
-#define WIFI_SSID       "你的WiFi名称"
-#define WIFI_PASSWORD   "你的WiFi密码"
-
-// 选择 LLM 提供商（二选一）
-#define LLM_PROVIDER_QWEN
-// #define LLM_PROVIDER_BAIDU
-
-// 百度 API（如使用百度LLM或TTS，必须填写）
-#define BAIDU_API_KEY       "你的百度API Key"
-#define BAIDU_SECRET_KEY    "你的百度Secret Key"
-
-// 阿里 API（如使用通义千问，必须填写）
-#define QWEN_API_KEY        "你的DashScope API Key"
+```bash
+cd src/LingxiGlove_Main
+cp secrets.example.h secrets.h
 ```
 
-> 百度 TTS 与百度 LLM 共用同一套 access_token，因此无论使用哪家 LLM，百度 API Key 都必须填写（用于 TTS）。
+编辑 `secrets.h`，填入以下内容：
+
+```cpp
+#define WIFI_SSID       "你的WiFi名称"      // 仅支持 2.4GHz（ESP32-S3 不支持 5GHz）
+#define WIFI_PASSWORD   "你的WiFi密码"
+#define QWEN_API_KEY    "sk-xxxxxxxxxxxxxxxx"  // 阿里 DashScope API Key
+```
+
+> `secrets.h` 已被 `.gitignore` 忽略，**禁止提交到仓库**。WiFi 凭证也可通过串口 `wifi` 命令运行时设置（写入 NVS，优先级高于 `secrets.h`）。
 
 ---
 
@@ -268,7 +279,7 @@ loop():
 |------|------|------|
 | 插入扩展板后 USB 端口消失 | RST 引脚冲突 | RST 引脚不插扩展板，悬空 |
 | I2S 播放无声 | 接线错误或喇叭正负接反 | 检查 BCLK/LRC/DIN 接线，喇叭不分正负 |
-| TTS 返回错误 | access_token 过期或 API Key 错误 | 检查 config.h 中的百度 API 配置 |
+| TTS 返回错误 | API Key 无效或额度用尽 | 检查 secrets.h 中的 QWEN_API_KEY |
 | MPU6050 读取失败 | I2C 地址错误或接线松动 | 确认 AD0 接 GND（地址0x68），检查 SDA/SCL |
 | WiFi 连接超时 | 信号弱或密码错误 | 靠近路由器，检查密码中的特殊字符 |
 
@@ -282,13 +293,71 @@ loop():
 
 ### 7.3 串口命令
 
-程序启动后可通过串口监视器（115200 波特率）发送单字符命令实时切换运行模式：
+程序启动后可通过串口监视器（**115200 波特率**）发送命令实时控制设备。命令支持单字符和多字符两种格式。
+
+#### 模式切换
 
 | 命令 | 功能 |
 |------|------|
-| `c` / `C` | 进入**采集模式**：暂停识别与 TTS，按 `SENSOR_READ_INTERVAL` 周期以 CSV 格式输出每帧传感器数据，用于 Edge Impulse 训练集采集 |
-| `r` / `R` | 回到**识别模式**：恢复手势识别与 TTS 播报 |
-| `h` / `H` / `?` | 打印命令帮助 |
+| `r` | 恢复**识别模式**（正常手势识别 + TTS 播报） |
+| `c` | 进入**词级数据采集模式**（CSV 输出，用于 Edge Impulse 训练） |
+| `f` | 进入**指拼采集模式**（CSV 输出，为未来指拼字母表模型预留） |
+
+#### 校准与设备信息
+
+| 命令 | 功能 |
+|------|------|
+| `k` | 执行**个体零偏校准**（~3 秒，手套平放静止） |
+| `i` 或 `info` | 打印当前设备信息（角色、MAC 地址、WiFi SSID、对端 MAC） |
+| `h` 或 `?` | 显示帮助 |
+
+#### TTS 与 LLM
+
+| 命令 | 功能 |
+|------|------|
+| `t <文本>` | **手动 TTS 播报**：合成并播放指定文本 |
+| `l <手势序列>` | **LLM 改写 + TTS**：将手势序列改写为自然句并播报 |
+
+示例：
+```
+t 你好世界
+l 我,吃饭
+```
+
+#### ESP-NOW 角色与配对（运行时）
+
+| 命令 | 功能 |
+|------|------|
+| `role master` | 设为 MASTER 角色，写入 NVS 并重启 |
+| `role slave` | 设为 SLAVE 角色，写入 NVS 并重启 |
+| `peer AA:BB:CC:DD:EE:FF` | 设置对端 MAC 地址，写入 NVS 并重启 |
+| `nvs clear` | 清除所有 NVS 配置（角色 + MAC），恢复编译期默认值并重启 |
+
+> **优先级**：NVS > `build_opt.h` 编译期宏 > `config.h` 默认值。
+
+#### WiFi 配置（运行时）
+
+| 命令 | 功能 |
+|------|------|
+| `wifi <SSID> <PASSWORD>` | 设置 WiFi 凭据，写入 NVS 并重启 |
+| `wifi <SSID>` | 设置无密码的开放网络 |
+| `wifi clear` | 清除 NVS WiFi 配置，恢复 `secrets.h` 默认值并重启 |
+
+> **优先级**：NVS 已保存值 > `secrets.h` 编译期宏。
+
+#### 准确率测试
+
+| 命令 | 功能 |
+|------|------|
+| `test <id> <count>` | 启动准确率测试会话（如 `test 1 30` 测试"你好"×30 次） |
+| `test cancel` | 取消当前测试会话 |
+| `test export` | 将所有历史测试 CSV 日志 dump 到串口 |
+| `test clear` | 清除所有测试日志 + 重置计数器 |
+| `test help` | 打印手势 ID 对照表和使用说明 |
+
+手势 ID 对照：
+- **单手**：1=你好, 2=谢谢, 3=再见, 4=是, 5=不
+- **双手**：101=加油, 102=一起, 103=我爱你, 104=帮助
 
 采集模式的 CSV 列定义：
 
@@ -327,39 +396,55 @@ timestamp_ms, ax, ay, az, gx, gy, gz, pitch, roll
 ## 8. 文件目录结构
 
 ```
-SignLingua/                          ← 项目根目录
+Lingxi/                              ← 项目根目录
 ├── README.md                        ← 仓库入口（首次克隆指引 + 工具链）
+├── spec.yaml                        ← 机器可读产品契约（与 SDD_SPEC.md 配套）
 ├── .gitignore                       ← 忽略 secrets.h / .DS_Store / build 产物
 ├── doc/
+│   ├── SDD_SPEC.md                  ← 系统设计契约（架构、模块边界、测试矩阵）
 │   ├── DEVELOPMENT.md               ← 本文档（开发指南）
-│   ├── SOLUTION_REVIEW.md           ← 整体方案 Review + 双手手语翻译白皮书前置
-│   └── acoustic_tdoa_simulation_results.{md,csv}  ← D1 仿真产物（由下方脚本生成）
+│   ├── SOLUTION_REVIEW.md           ← 整体方案 Review + 双手技术白皮书
+│   ├── DOUBLE_HAND_DESIGN.md        ← 双手协同设计白皮书（ESP-NOW + TDOA）
+│   ├── USER_GUIDE.md                ← 用户指南（烧录、配置、串口交互）
+│   ├── PERFORMANCE_OPTIMIZATION.md  ← 性能优化记录
+│   ├── Edge_Impulse_ESP32_S3_训练指南.md  ← Edge Impulse 模型训练指南
+│   └── acoustic_tdoa_simulation_results.md ← TDOA 仿真结果
 ├── src/
 │   └── LingxiGlove_Main/            ← Arduino 主项目
-│       ├── LingxiGlove_Main.ino     ← 主程序入口（识别/采集/FingerSpelling 三模式 + 串口命令）
-│       ├── config.h                 ← 全局配置（含 ENABLE_FLEX_SENSORS / ENABLE_ESPNOW_SYNC 开关）
-│       ├── sensor_manager.h/.cpp    ← 传感器管理（MPU6050 + 5 路弯曲传感器 ADC；支持校准注入）
-│       ├── gesture_recognizer.h/.cpp ← 手势识别引擎（RuleBased + 抽象基类）
-│       ├── motion_detector.h/.cpp   ← 动作/静止门控（加速度方差 + 陀螺仪模长双阈值）
+│       ├── LingxiGlove_Main.ino     ← 主程序入口（识别/采集/测试多模式 + 串口命令分发）
+│       ├── config.h                 ← 全局配置（特性开关、阈值、引脚定义）
+│       ├── build_opt.h              ← 编译期角色选择（-DESPNOW_ROLE=0|1）
+│       ├── secrets.example.h        ← 密钥模板（首次使用需 cp 为 secrets.h）
+│       ├── sensor_manager.h/.cpp    ← 传感器管理（MPU6050 + 5 路弯曲 ADC；姿态解算）
+│       ├── motion_detector.h/.cpp   ← 动作/静止门控（加速度方差 + 陀螺仪双阈值）
 │       ├── calibration.h/.cpp       ← 个体校准（IMU 零偏 + Flex 量程，NVS 持久化）
-│       ├── offline_voice_pcm.h/.cpp ← 离线语音 PCM 表（空表时自动降级为蜂鸣）
-│       ├── local_tts_fallback.h/.cpp ← TTS 失败兜底（从 PCM 表匹配 label 播放）
-│       ├── esp_now_sync.h/.cpp      ← 双手 ESP-NOW 同步（HandFrame，MASTER/SLAVE 角色）
-│       ├── wifi_manager.h/.cpp      ← WiFi 连接
-│       ├── http_client.h/.cpp       ← HTTP 请求
-│       ├── llm_client.h/.cpp        ← LLM 接口
-│       ├── tts_player.h/.cpp        ← TTS 语音播放（支持 PlayPcmInt16 动态采样率）
+│       ├── gesture_recognizer.h/.cpp ← 手势识别（RuleBased + BimanualRule + 抽象基类）
+│       ├── gesture_arbitrator.h/.cpp ← 手势仲裁层（方案C：统一决策 + 双手优先）
+│       ├── esp_now_sync.h/.cpp      ← 双手 ESP-NOW 同步（HandFrame 30B，MASTER/SLAVE）
+│       ├── nvs_config.h/.cpp        ← 运行时角色/MAC/WiFi 持久化
+│       ├── wifi_manager.h/.cpp      ← WiFi 连接 + 断线重连
+│       ├── http_client.h/.cpp       ← HTTPS GET/POST + SSE 流式
+│       ├── llm_client.h/.cpp        ← LLM 改写（Qwen/百度双提供商）
+│       ├── tts_player.h/.cpp        ← Qwen-TTS + LittleFS 缓存 + I2S 播放
+│       ├── local_tts_fallback.h/.cpp ← TTS 失败兜底（离线 PCM 匹配）
+│       ├── offline_voice_pcm.h/.cpp ← 离线语音 PCM 表
+│       ├── accuracy_test.h/.cpp     ← 现场准确率测试（LittleFS CSV + test 命令）
 │       └── README.md                ← 源码结构说明
-├── src/tests/                       ← Host-side 单元测试（纯 C++，不依赖 Arduino）
-│   ├── test_motion_detector/        ← 16/16 通过
-│   ├── test_calibration_core/       ← 24/24 通过
-│   ├── test_local_tts_fallback/     ← 20/20 通过
-│   └── test_esp_now_sync/           ← 24/24 通过（-Werror -Wpedantic）
-├── test_blink/                      ← 板载 LED 自检
-├── test_mpu6050/                    ← MPU6050 读数自检
+├── src/tests/                       ← Host-side 单元测试（纯 C++11，无 Arduino 依赖）
+│   ├── test_motion_detector/        ← 动作门控测试
+│   ├── test_calibration_core/       ← 校准算法测试
+│   ├── test_local_tts_fallback/     ← 离线 TTS 回退测试
+│   ├── test_esp_now_sync/           ← HandFrame 协议测试（-Werror -Wpedantic）
+│   ├── test_bimanual_recognizer/    ← 双手识别规则测试
+│   ├── test_arbitrator/             ← 手势仲裁层测试
+│   ├── test_llm_rewrite/            ← LLM 改写解析测试
+│   └── test_tts_parsers/            ← TTS/WAV 解析器测试
+├── src/tests/test_acoustic_tdoa/    ← Arduino POC（声学 TDOA，暂缓）
+├── src/tests/test_speaker/          ← Arduino 音频自检
 └── tools/
-    ├── gen_offline_voice_pcm.py     ← 调百度 TTS 生成离线 PCM 表
-    └── acoustic_tdoa_simulate.py    ← 双手 TDOA 测距 Python 仿真（D 阶段白皮书数据源）
+    ├── gen_offline_voice_pcm.py     ← 调云端 TTS 生成离线 PCM 表
+    ├── gen_chirp_pcm.py             ← 生成 17-19kHz chirp PCM（声学 TDOA 用）
+    └── acoustic_tdoa_simulate.py    ← 双手 TDOA 测距 Python 仿真
 ```
 
 ---
@@ -392,7 +477,7 @@ SignLingua/                          ← 项目根目录
 | 7 | **一起** | 双手五指并拢，掌心相对，向前同步推出 | 双手 pitch 同方向↑ + 双手 roll 对称接近 0° | 不依赖弯曲传感器，双手 IMU 对称运动主导 |
 | 8 | **帮助** | 右手握拳置于左手掌心，左手掌朝上托举 | 右手拇指弯（AO 高值）+ 左手 pitch 朝上静止 + 右手 pitch 居中 | 非对称姿态，右手握拳 + 左手托举可靠区分 |
 | 9 | **我爱你** | 双手交叉置胸口，手掌朝内，静止保持 | 双手 pitch 朝内居中 + 双手 roll 交叉方向相反 + 右手拇指伸直 | 静态手势，保持 500 ms 触发防抖 |
-| 10 | **我们走** | 双手握拳，同步交替向前摆臂（模拟行走节律） | 双手 pitch 交替周期性变化（异相）+ 右手拇指弯 | 动态手势，异相摆臂与同相的"加油"可靠区分 |
+| 10 | **我们走** | 双手握拳，同步交替向前摆臂（模拟行走节律） | 双手 pitch 交替周期性变化（异相）+ 右手拇指弯 | ⚠️ 代码待实现（accuracy_test 暂无此 ID）；动态手势，异相摆臂与同相的"加油"可靠区分 |
 
 ### 9.3 演示建议
 
@@ -419,16 +504,24 @@ SignLingua/                          ← 项目根目录
 
 ### 10.2 开发阶段规划
 
-#### P1：Slave 手套硬件搭建（当前优先级 🔥）
+#### P1：Slave 手套硬件搭建 + ESP-NOW 双板通信 ✅ 已完成（2026-05-14）
 
 **目标**：让第二块 ESP32-S3 + MPU6050 正常运行，并能通过 ESP-NOW 与 Master 同步数据。
 
-- [ ] 将第二块 ESP32-S3 烧录 **Slave 角色固件**（在 `config.h` 将 `ESPNOW_ROLE` 切换为 `SLAVE`）
-- [ ] Slave 板接入 MPU6050，确认 I2C 读数正常（先烧录 `test_mpu6050` 自检验证）
-- [ ] 验证双板 ESP-NOW 配对：Master 端串口应打印 `[ESPNow] Slave paired`，RSSI > -70 dBm
-- [ ] 验证双手帧融合：`HandFrame` 左右手数据均有效，`frame.left_valid && frame.right_valid` 同时为真
+- [x] 将第二块 ESP32-S3 烧录 Slave 角色固件（NVS 运行时配置，串口命令 `role slave` 即可切换）
+- [x] Slave 板接入 MPU6050，确认 I2C 读数正常
+- [x] 验证双板 ESP-NOW 配对：Master 端串口打印 `[双手] ✅ Slave 已连接！首帧已收到`
+- [x] 验证 SLAVE 发帧被 MASTER ACK：`GetEspNowTxCount()` 持续增长
+- [x] ESP-NOW 信道同步：SLAVE 先连 WiFi AP 同步信道，解决帧全部丢失问题
+- [x] NVS 运行时角色配置：一份固件 + 串口 `role master/slave` 切换，无需重编译
+- [x] LED 蓝色指示灯：双方通信成功后板载 LED（D16/GPIO45）亮蓝色
 
-#### P2：弯曲传感器接入（当前优先级 🔥）
+**关键实现细节**：
+- **信道同步**：ESP-NOW 要求两端在同一 WiFi 信道。MASTER 连 AP 后信道由 AP 决定，SLAVE 必须连同一 AP 才能在相同信道通信。
+- **LED 引脚**：Arduino Nano ESP32-S3 板载 RGB LED 是三个独立 GPIO（低电平有效）：Red=GPIO46(D14), Green=GPIO0(D15), Blue=GPIO45(D16)。注意：GPIO48(LED_BUILTIN) 是 SPI SCK，不是 LED。
+- **配对成功提示音**：MASTER 首次收到 Slave 帧时播放两声升调蜂鸣。
+
+#### P2：弯曲传感器接入（当前优先级 🔥🔥🔥）
 
 **目标**：将 1 路拇指弯曲传感器纳入手势特征，区分握拳（拇指弯）与张开（拇指伸）两种状态。
 
@@ -453,15 +546,29 @@ SignLingua/                          ← 项目根目录
 - §9 全部 10 句演示词汇**均不依赖**双手间距，P3 完成后即可全功能演示
 - 若需要演示"远近"语义手势，再启动 INMP441 采购和 TDOA 方案（详见 `DOUBLE_HAND_DESIGN.md` §4.8）
 
-### 10.3 近期里程碑
+### 10.3 里程碑进度追踪
 
-| 里程碑 | 验收标准 |
-|--------|---------|
-| M1：Slave 固件运行 + ESP-NOW 双板通信 | Master 串口实时打印双手融合帧，延迟 < 30 ms |
-| M2：弯曲传感器接入 + 校准完成 | 采集模式 CSV 弯曲列稳定，握拳/展开 ADC 差值 > 200 count |
-| M3：全词汇演示可跑通（规则识别器） | §9 的 10 个演示词汇均可触发 TTS 播报，误识率 < 20% |
-| M4：Edge Impulse 模型上板推理 | 10 个词汇识别准确率 > 90%，推理延迟 < 50 ms |
+| 里程碑 | 验收标准 | 状态 |
+|--------|---------|------|
+| M1：Slave 固件运行 + ESP-NOW 双板通信 | Master 串口打印 `Slave 已连接`，双板 LED 亮蓝色 | ✅ 已完成 (2026-05-14) |
+| M2：弯曲传感器接入 + 校准完成 | 采集模式 CSV 弯曲列稳定，握拳/展开 ADC 差值 > 200 count | 🔥 进行中 |
+| M3：全词汇演示可跑通（规则识别器） | §9 的 10 个演示词汇均可触发 TTS 播报，误识率 < 20% | ⏳ 待开始 |
+| M4：Edge Impulse 模型上板推理 | 10 个词汇识别准确率 > 90%，推理延迟 < 50 ms | ⏳ 待开始 |
+
+### 10.4 已完成的关键技术攻关
+
+| 日期 | 模块 | 内容 | 详见 |
+|------|------|------|------|
+| 2026-05-01 | TTS | SSE 流式播放修复（line_buf 溢出 + PCM 字节对齐） | MEMORY.md |
+| 2026-05-05 | 内存 | DRAM 溢出修复（PSRAM 迁移 192KB） | MEMORY.md |
+| 2026-05-09 | TTS | 非流式架构改造 + LittleFS 缓存加速 | MEMORY.md |
+| 2026-05-09 | TTS | 播放杂音/拖音/停顿变音全系列修复 | MEMORY.md |
+| 2026-05-11 | ESP-NOW | NVS 运行时角色配置（一份固件双角色） | MEMORY.md |
+| 2026-05-14 | ESP-NOW | 信道同步修复 + LED 蓝色指示灯 | commit 4c8c887 |
+| 2026-05-20 | 双手识别 | `BimanualRuleRecognizer` 补「帮助」规则（左手托举+右手居中）+ host 单元测试 8 用例 | `gesture_recognizer.cpp` / `tests/test_bimanual_recognizer/` |
+| 2026-05-22 | 手势仲裁层 | 实现方案C统一决策层：双手优先抑制单手、确认窗口200ms、冷却2s；host 单元测试 8 用例 24 断言 | `gesture_arbitrator.{h,cpp}` / `tests/test_arbitrator/` |
+| 2026-05-20 | 准确率测试 | `accuracy_test` 模块：离线手势识别准确率评测框架，LittleFS CSV 日志，`test` 串口命令族 | `accuracy_test.{h,cpp}` |
 
 ---
 
-*文档版本: MVP-v1.2 | 更新日期: 2026-05-01*
+*文档版本: v2.2 | 更新日期: 2026-05-23*

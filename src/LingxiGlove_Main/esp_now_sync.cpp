@@ -71,6 +71,19 @@ static inline void OnEspNowRecvImpl(const uint8_t* mac_addr,
     HandFrame frame;
     memcpy(&frame, data, sizeof(HandFrame));
 
+    // 协议版本校验：版本不匹配时丢弃，避免新旧固件混用导致数据错误
+    if (frame.proto_version != HANDFRAME_PROTO_VERSION) {
+        static uint32_t s_last_warn_ms = 0;
+        uint32_t now_ms = (uint32_t)millis();
+        if (now_ms - s_last_warn_ms > 3000) {  // 限频：最多 3 秒打印一次
+            s_last_warn_ms = now_ms;
+            Serial.printf("[ESP-NOW] WARN: 协议版本不匹配 (收到 v%u, 本机 v%u)，丢弃\n",
+                          (unsigned)frame.proto_version,
+                          (unsigned)HANDFRAME_PROTO_VERSION);
+        }
+        return;
+    }
+
     s_rx_count++;
     HandFrameHandler h = s_handler;
     if (h) {
@@ -107,28 +120,36 @@ static void OnEspNowSend(const uint8_t* /*mac_addr*/, esp_now_send_status_t stat
 bool InitEspNowSync(EspNowRole role, const uint8_t peer_mac[6]) {
     if (s_initialized) return true;
 
-    // 角色差异化校验（s_role 真实参与决策，非空字段）：
-    //   - MASTER 必须明确指定 SLAVE 的 MAC，拒绝广播。因为 MASTER 负责
-    //     收集数据、打时间戳、喂识别器，若广播发送会造成：(1) 任何同频段
-    //     ESP-NOW 设备都会收到，污染频段；(2) 没有对端时收不到 send ACK，
-    //     丢包率统计失真。
-    //   - SLAVE 允许 peer_mac=nullptr，此时使用广播 MAC，适合尚未配对
-    //     场景或"一主多从"原型。
-    if (role == ESPNOW_ROLE_MASTER && peer_mac == nullptr) {
-        return false;
-    }
+    // 角色差异化校验：
+    //   - MASTER peer_mac=nullptr 时：仅接收模式（注册广播 peer 以收帧，
+    //     SendHandFrame 会被 s_peer_set=false 拦截，不会误发）。
+    //     适用于运行时配置场景——启动时尚不知道 SLAVE MAC。
+    //   - MASTER peer_mac 非空时：注册指定 peer，可收可发。
+    //   - SLAVE  peer_mac=nullptr 时：注册广播 peer FF:FF:FF:FF:FF:FF。
+    //   - SLAVE  peer_mac 非空时：注册指定 MASTER peer。
     s_role = role;
     if (peer_mac) {
         memcpy(s_peer_mac, peer_mac, 6);
+        s_peer_set = true;
     } else {
-        // 仅 SLAVE 到达此分支：注册广播 peer FF:FF:FF:FF:FF:FF
-        memset(s_peer_mac, 0xFF, 6);
+        // MASTER+nullptr: 仅接收模式，不注册发送 peer
+        // SLAVE+nullptr:  广播发送模式
+        if (role == ESPNOW_ROLE_SLAVE) {
+            memset(s_peer_mac, 0xFF, 6);
+            s_peer_set = true;
+        } else {
+            // MASTER 仅接收，不设 peer（SendHandFrame 会被 s_peer_set 拦截）
+            memset(s_peer_mac, 0xFF, 6);  // 广播地址仅用于 add_peer 以接收
+            s_peer_set = false;
+        }
     }
-    s_peer_set = true;
 
-    // STA 模式，不连 AP
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect(false, true);
+    // STA 模式。若 WiFi 已连接 AP（如 SLAVE 为同步信道预先连了 AP），
+    // 不执行 disconnect，保持信道跟随 AP。否则设为未连接的 STA 模式。
+    if (WiFi.status() != WL_CONNECTED) {
+        WiFi.mode(WIFI_STA);
+        WiFi.disconnect(false, true);
+    }
 
     if (esp_now_init() != ESP_OK) {
         return false;

@@ -299,13 +299,14 @@ ESP32 只有一个 2.4 GHz 射频前端，ESP-NOW 与 Wi-Fi STA 共享此射频�
 struct __attribute__((packed)) HandFrame {
     uint32_t master_timestamp_ms;   // Master 侧回填；Slave 发送时为 0
     uint16_t seq_no;                // Slave 单调递增，循环至 65535
-    uint16_t reserved0;             // 预留对齐位（当前恒 0）
+    uint8_t  frame_type;            // 帧类型：0=传感器数据，1=心跳，2=配置同步（预留）
+    uint8_t  proto_version;         // 协议版本号：当前 = 1，接收端不匹配时丢弃
     int16_t  ax, ay, az;            // IMU 原始 LSB，±2g full-scale
     int16_t  gx, gy, gz;            // IMU 原始 LSB，±250°/s
     uint16_t flex[5];               // Flex ADC 原始 0..4095
 };
 // sizeof(HandFrame) == 30 bytes （本机 clang++ -std=c++11 实测）
-// offsets: ts@0  seq@4  rsv@6  ax@8  flex@20  end@30
+// offsets: ts@0  seq@4  type@6  ver@7  ax@8  flex@20  end@30
 // ESP-NOW 单包上限 250B，余量 220B 充足
 
 bool InitEspNowSync(EspNowRole role, const uint8_t peer_mac[6]);

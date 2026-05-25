@@ -1,7 +1,7 @@
 # LingxiGlove 整体方案 Review + 双手手语翻译技术方案
 
-> 版本：2026-05-01  ·  作者：Aone Copilot
-> 基于 `doc/DEVELOPMENT.md`（MVP-v1.1）、`doc/灵犀手套SignLingua_项目招募说明书.md`、
+> 版本：2026-05-23  ·  作者：Lingxi Team
+> 基于 `doc/DEVELOPMENT.md`（MVP-v1.1）、`doc/灵犀手套Lingxi_项目招募说明书.md`、
 > `doc/Edge_Impulse_ESP32_S3_训练指南.md` 与当前 `src/LingxiGlove_Main` 实际代码进行整体审阅。
 
 ---
@@ -31,7 +31,7 @@
 - 增加一个**"字母指拼"兜底模式**：中国手语 / ASL 的指拼字母表是一个**有限且固定的手型集合**（CSL 方案常见为 30 个，ASL 常见为 26 个；具体手型数量在做数据集前由团队确认并固化），用同一模型训练，配合字母序列 → LLM 组词，扩展到开放词汇
 - 答辩话术："10 个高频词覆盖急救场景的快路径，指拼模式覆盖开放词汇的慢路径，形成**分级响应**"（端到端延迟指标待实测后补入）
 
-#### 🟡 风险 2：动态手势的「分割问题」（Segmentation）没提及
+#### 🟡 风险 2：动态手势的「分割问题」（Segmentation）没提及 — ✅ 已缓解
 
 手语不是静态摆姿势，是**连续动作流**。当前方案（定长 2 秒窗口 + 200ms 滑动）隐含假设"每 2 秒恰好有一个完整手势"。真实场景中：
 - 用户连续打"谢谢"→"再见"，两个动作粘连
@@ -40,7 +40,7 @@
 **评委会问的一击**："用户连续打三个词，你的系统如何知道什么时候是一个词结束？"
 
 **建议改进**：
-- 引入**"静止检测门控"**：加速度方差 + 弯曲传感器变化率同时低于阈值 → 标记为"休止符"（本 review 对应的 C2 任务将以无模型的阈值法先落地，体积几乎为零）
+- ✅ **已实现**：`motion_detector.h/cpp`（动作/静止门控，基于加速度方差 + 陀螺仪模长双阈值迟滞状态机），以无模型阈值法落地
 - 进一步可训练一个二分类的**"动作/静止"前置模型**，先做分割再做分类（HAR 领域 VAD 的标准做法）；模型体积在训练后以实际导出结果为准
 
 #### 🟡 风险 3：Edge Impulse 训练数据代表性不足
@@ -53,14 +53,15 @@
 - **Per-user calibration**：开机时要求用户做 5 个参考手势，对弯曲传感器做个体化归一化
 - 招募 **≥ 10 人** 采数据，做 **leave-one-user-out** 交叉验证
 
-#### 🟡 风险 4：端云协同的「断网兜底」不明确
+#### 🟡 风险 4：端云协同的「断网兜底」不明确 — ✅ 已缓解
 
 - LLM 断网 = 语义重组失效
 - TTS 断网 = 彻底哑火
 
 **建议改进**：
-- 10 个核心手势的 PCM 音频预生成刷到 Flash（每条 16kHz×16bit×1s ≈ 32KB，10 条 ≈ 320KB）
-- 加一个 `LocalTtsFallback`：网络异常时走本地 PCM
+- ✅ **已实现**：`local_tts_fallback.h/cpp` + `offline_voice_pcm.h/cpp`，网络异常时按 label 匹配离线 PCM
+- ✅ PCM 表框架就绪；实际音频需运行 `tools/gen_offline_voice_pcm.py` 预生成（每条 16kHz×16bit×1s ≈ 32KB，10 条 ≈ 320KB）
+- ✅ 空表时降级蜂鸣（`playTestTone` 安全兜底）
 - 答辩亮点："**断网也能说救命**"
 
 #### 🟢 小建议 5：振动马达 + OLED 没在代码里
@@ -151,9 +152,11 @@ MPU6050 只能给加速度+角速度，**得不到绝对位置**（积分漂移�
   struct HandFrame {
       uint32_t master_timestamp_ms;  // 已校正到主节点时钟域
       uint16_t seq_no;
+      uint8_t  frame_type;           // 帧类型：0=传感器数据，预留 1=心跳/2=配置同步
+      uint8_t  proto_version;        // 协议版本号（当前=1），版本不匹配时丢弃
       int16_t  ax, ay, az, gx, gy, gz;
       uint16_t flex[5];
-  };  // 28 bytes，ESP-NOW 最大 250B
+  };  // 30 bytes，ESP-NOW 最大 250B
   ```
 
 **第 2 层：相对位姿估计（解决难点 #2）**
@@ -233,13 +236,15 @@ output = Dense(50, 'softmax')(merged)
 
 ### 2.4 工程落地路线图
 
+> **注意**：本文的阶段编号用于方案评审语境，与 [`SDD_SPEC.md §7`](SDD_SPEC.md) 的编号存在映射关系：本文 P2（ESP-NOW）= SDD P1（✅ 已完成），本文 P1/P4 = SDD P3，本文 P3 = SDD P4。以 SDD_SPEC 为权威编号。
+
 下表「验收标准」列为**项目管理意义上的目标值**（用于任务完成判定），不代表当前已达成。开立项评审时请各阶段 Owner 评估可行性后再冻结。
 
 | 阶段 | 里程碑 | 周数 | 目标验收标准 |
 |------|--------|------|----------|
 | **P0** | 当前单手 MVP | — | ✅ 已完成 |
+| **P2** | 双手硬件 + ESP-NOW 时钟同步 | 2 | ✅ 已完成（2026-05-14），对应 SDD P1 |
 | **P1** | 单手 Edge Impulse 10 类 | 3 | 单人 ≥95%、跨用户 ≥85% 为目标 |
-| **P2** | 双手硬件 + ESP-NOW 时钟同步 | 2 | 跨节点对齐误差目标 < 5ms（首轮实测后按可达性收紧） |
 | **P3** | 声学 TDOA 测距子系统 | 2 | 50cm 量程内误差目标 < 5cm（具体以仿真 + POC 实测为准） |
 | **P4** | 双流 CNN 训练（50 类） | 3 | 端侧 F1 ≥ 0.85 为目标 |
 | **P5** | 云端 Sign-Transformer | 3 | 词表规模、top-k 目标在 P4 基础上立项时再具体化 |
@@ -260,14 +265,24 @@ output = Dense(50, 'softmax')(merged)
 
 ## 三、立即可行的下一步（按优先级）
 
-按 C → A → D → B 顺序交付（以下路径均为**规划产物**，将在后续 commit 中按序逐个创建）：
+按 C → A → D → B 顺序交付：
 
 1. **[C 阶段 · 单手增量强化]** 把 review 中的 4 个风险落地到代码：
-   - 风险 1：FingerSpelling 模式钩子（串口命令 `f`，定位为"开放词汇兜底通道"；指拼识别模型待训练，当前阶段仅落地模式切换与串口反馈骨架，不伪造识别结果）
-   - 风险 2：`motion_detector.h/cpp`（动作/静止分割，基于加速度方差 + 陀螺仪模长双阈值）
-   - 风险 3：`calibration.h/cpp`（串口命令 `k`，Preferences/NVS 持久化；启动时自动加载）
-   - 风险 4：`local_tts_fallback.h/cpp` + `offline_voice_pcm.h`（PCM 表空时降级蜂鸣，附 `tools/gen_offline_voice_pcm.py` 生成脚本）
-2. **[A 阶段 · 双手接口预埋]** `esp_now_sync.h/cpp` 接口层（`ENABLE_ESPNOW_SYNC` 开关控制，默认关闭，不改变 MVP 行为）
+   - ✅ 风险 1：FingerSpelling 模式钩子（串口命令 `f`，模式切换已实现；指拼识别模型待训练）
+   - ✅ 风险 2：`motion_detector.h/cpp`（动作/静止分割，加速度方差 + 陀螺仪模长双阈值）
+   - ✅ 风险 3：`calibration.h/cpp`（串口命令 `k`，NVS 持久化；启动时自动加载）
+   - ✅ 风险 4：`local_tts_fallback.h/cpp` + `offline_voice_pcm.h`（PCM 表空时降级蜂鸣）
+2. **[A 阶段 · 双手接口]** ✅ `esp_now_sync.h/cpp`（ESP-NOW 双板通信已验证，NVS 运行时角色切换）
+3. **[D 阶段 · TDOA 原理验证]** ✅ 已完成：
+   - ✅ Python 仿真：`tools/acoustic_tdoa_simulate.py`（500 次 Monte Carlo）
+   - ✅ Arduino POC：`src/tests/test_acoustic_tdoa/`
+4. **[B 阶段 · 答辩材料]** ✅ `doc/DOUBLE_HAND_DESIGN.md` 正式白皮书已完成
+
+### 当前优先级（2026-05-23 更新）
+
+- **🔥 P2**：弯曲传感器接入（拇指 1 路 Flex ADC + 校准 + 手势规则更新）
+- **⏳ P3**：Edge Impulse 双手数据采集 + 1D-CNN 模型训练上板
+- **⏳ P5-P7**：云端 Sign-Transformer + 端云联调 + 答辩为）
 3. **[D 阶段 · TDOA 原理验证]** 周末级 POC：
    - Python 仿真：`tools/acoustic_tdoa_simulate.py`
    - Arduino POC：`src/tests/test_acoustic_tdoa/`（发端/收端由编译开关切换，仅 POC 不嵌入主程序）

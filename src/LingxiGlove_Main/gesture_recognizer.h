@@ -89,6 +89,10 @@ GestureRecognizer* createGestureRecognizer();
 enum BimanualGestureType {
     BIMANUAL_GESTURE_NONE  = 0,
     BIMANUAL_GESTURE_JIAYOU,    // 加油：双手同时 pitch > BIMANUAL_PITCH_THRESHOLD_DEG
+    BIMANUAL_GESTURE_YIQI,      // 一起：双手同时 pitch < BIMANUAL_PITCH_DOWN_THRESHOLD_DEG
+    BIMANUAL_GESTURE_WOAINI,    // 我爱你：双手 roll 对称偏转（右手左倾+左手右倾）
+    BIMANUAL_GESTURE_BANGZHU,   // 帮助：左手掌朝上托举 + 右手握拳置左掌（pitch/roll 居中）
+    BIMANUAL_GESTURE_COUNT
 };
 
 /**
@@ -103,6 +107,8 @@ enum BimanualGestureType {
 struct BimanualInput {
     float master_pitch;         // Master 手（右手）当前俯仰角，单位 °
     float slave_pitch;          // Slave  手（左手）最新俯仰角，单位 °
+    float master_roll;          // Master 手（右手）当前横滚角，单位 °
+    float slave_roll;           // Slave  手（左手）最新横滚角，单位 °
     unsigned long slave_frame_age_ms;  // Slave 帧距离现在的毫秒数
 };
 

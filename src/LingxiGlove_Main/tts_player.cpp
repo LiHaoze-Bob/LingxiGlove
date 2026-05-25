@@ -8,7 +8,123 @@
 #include <ArduinoJson.h>
 #include <math.h>
 
+#if TTS_CACHE_ENABLE
+#include <LittleFS.h>
+#include <esp_partition.h>
+#endif
+
 static bool s_i2sInitialized = false;
+
+// -----------------------------------------------------------------------
+// PCM 累积缓冲（运行时从 PSRAM 动态申请，不占 DRAM .bss）
+// -----------------------------------------------------------------------
+// 必须放在 speak() 外部的两个原因：
+//   1. 容量 192KB 无法放栈（loopTask 栈 8KB）；
+//   2. speak() 内 static 变量两次调用之间内容不清零，若本次数据比上次短，
+//      末尾会残留上次的旧 PCM → 播放顺序错乱（如"不，不用"变成"不用，不"）。
+//   将其提到函数外 + 每次 speak() 入口强制清零前 12 字节（破坏旧 WAV 头），
+//   彻底消除跨次调用的数据残留。
+//
+// 内存策略：
+//   用 heap_caps_malloc(MALLOC_CAP_SPIRAM) 在运行时动态申请 PSRAM。
+//   EXT_RAM_ATTR / EXT_RAM_BSS_ATTR 等编译期宏在 PSRAM 未开启时都是空宏，
+//   会导致 DRAM .bss 溢出；heap_caps_malloc 更可靠——
+//   PSRAM 可用时优先分 PSRAM，不可用时 fallback 到普通堆（此时 speak() 会
+//   打印 WARN 但不崩溃，功能降级）。
+// ⚠️ 前提：Arduino IDE → Tools → PSRAM → "OPI PSRAM" 必须开启，否则 fallback 到内部堆后 DRAM 会紧张。
+static const size_t kPcmAccumBufSize = 192000;  // 约 4s @ 24kHz/16bit/Mono
+static uint8_t* s_pcm_accum_buf = nullptr;       // initTTS() 里分配，生命周期覆盖整个运行期
+
+// ======================================================================
+// TTS 本地缓存（LittleFS）
+// ======================================================================
+#if TTS_CACHE_ENABLE
+
+static bool s_cache_initialized = false;
+static const char* kTtsCacheDir = "/tts_cache";
+
+/**
+ * @brief FNV-1a 32-bit 哈希：将任意长度 UTF-8 文本映射为 8 位 hex 文件名。
+ *
+ * 选择 FNV-1a 的理由：零依赖、常量时间复杂度、分布均匀，
+ * 10 句演示词汇碰撞概率约 1e-8，完全可接受。
+ */
+static uint32_t Fnv1aHash(const char* str) {
+    uint32_t hash = 0x811c9dc5u;  // FNV offset basis
+    while (*str) {
+        hash ^= (uint8_t)*str++;
+        hash *= 0x01000193u;      // FNV prime
+    }
+    return hash;
+}
+
+/**
+ * @brief 由文本生成缓存文件路径（如 "/tts_cache/a1b2c3d4.wav"）。
+ *
+ * @param text    输入文本（UTF-8）
+ * @param out_path 输出路径缓冲区，至少 32 字节
+ * @param out_size 缓冲区大小
+ */
+static void BuildCachePath(const char* text, char* out_path, size_t out_size) {
+    uint32_t hash = Fnv1aHash(text);
+    snprintf(out_path, out_size, "%s/%08x.wav", kTtsCacheDir, hash);
+}
+
+/**
+ * @brief 从 LittleFS 缓存读取 WAV 到 PSRAM 缓冲区。
+ *
+ * @param cache_path  缓存文件路径
+ * @param dst         目标缓冲区（PSRAM）
+ * @param dst_size    缓冲区最大字节数
+ * @return 读取的字节数；0 表示缓存不存在或读取失败
+ */
+static size_t ReadCache(const char* cache_path, uint8_t* dst, size_t dst_size) {
+    if (!s_cache_initialized || dst == nullptr) return 0;
+
+    File file = LittleFS.open(cache_path, "r");
+    if (!file) return 0;
+
+    size_t file_size = file.size();
+    if (file_size == 0 || file_size > dst_size) {
+        file.close();
+        return 0;
+    }
+
+    size_t total_read = file.read(dst, file_size);
+    file.close();
+    return total_read;
+}
+
+/**
+ * @brief 将 WAV 数据写入 LittleFS 缓存。
+ *
+ * 写入失败（Flash 满等）不影响正常 TTS 流程，仅打印 WARN。
+ *
+ * @param cache_path  缓存文件路径
+ * @param src         WAV 数据源
+ * @param src_len     数据字节数
+ */
+static void WriteCache(const char* cache_path, const uint8_t* src, size_t src_len) {
+    if (!s_cache_initialized || src == nullptr || src_len == 0) return;
+
+    File file = LittleFS.open(cache_path, "w");
+    if (!file) {
+        DEBUG_PRINTLN("[TTS缓存] 写入失败: 无法创建文件");
+        return;
+    }
+
+    size_t written = file.write(src, src_len);
+    file.close();
+
+    if (written != src_len) {
+        DEBUG_LOG("[TTS缓存] 写入不完整: %u/%u B", (uint32_t)written, (uint32_t)src_len);
+        LittleFS.remove(cache_path);  // 删掉残缺文件，下次重新合成
+    } else {
+        DEBUG_LOG("[TTS缓存] 已缓存: %s (%u B)", cache_path, (uint32_t)src_len);
+    }
+}
+
+#endif  // TTS_CACHE_ENABLE
 
 // ----------------------------------------------------------------------
 // 工具函数：饱和软件增益
@@ -29,6 +145,101 @@ static void ApplyGain(uint8_t* buf, size_t byte_count) {
         if (amplified < -32768.0f) amplified = -32768.0f;
         samples[i] = static_cast<int16_t>(amplified);
     }
+}
+
+// ----------------------------------------------------------------------
+// 工具函数：软件静音门控
+// ----------------------------------------------------------------------
+// 问题背景：
+//   Qwen-TTS 在逗号/句号停顿段生成的 PCM 幅度从正常语音（±3000~±30000）
+//   骤降到接近零（±10~±200）。MAX98357A 功放增益 9dB 会把这段量化底噪放大成
+//   可听见的低频"嗷"变音（停顿处的特征噪声）。
+//
+// 原理：
+//   扫描全量 int16 PCM 样本，若连续 kSilenceWindow 个样本的峰值幅度都低于
+//   kSilenceThreshold，则视为停顿段，将该窗口内所有样本替换为严格零值。
+//   替换为零后 MAX98357A 在 BCLK 持续时输出的是严格零信号，功放底噪消失。
+//
+// 参数选择：
+//   kSilenceThreshold = 200：正常语音最低幅度约 800，量化噪底 < 100，阈值 200 居中。
+//   kSilenceWindow    = 48 samples = 2ms @24kHz：足够短不影响语音起止，
+//                       足够长不会误杀正常语音中的过零点。
+//
+// @param buf        int16 PCM 缓冲区首地址（字节）
+// @param byte_count 缓冲区字节数（必须为偶数）
+static void ApplySilenceGate(uint8_t* buf, size_t byte_count) {
+    const int16_t kSilenceThreshold = 200;
+    const size_t  kSilenceWindow    = 48;  // samples，约 2ms @24kHz
+
+    int16_t* samples     = reinterpret_cast<int16_t*>(buf);
+    size_t   sample_count = byte_count / sizeof(int16_t);
+
+    size_t i = 0;
+    while (i + kSilenceWindow <= sample_count) {
+        // 找出窗口内峰值幅度
+        int16_t peak = 0;
+        for (size_t j = i; j < i + kSilenceWindow; ++j) {
+            int16_t abs_val = samples[j] < 0 ? -samples[j] : samples[j];
+            if (abs_val > peak) peak = abs_val;
+        }
+        if (peak < kSilenceThreshold) {
+            // 峰值低于阈值：视为停顿段，替换为严格零值
+            for (size_t j = i; j < i + kSilenceWindow; ++j) {
+                samples[j] = 0;
+            }
+        }
+        i += kSilenceWindow;
+    }
+    // 处理末尾不足一个窗口的样本（一般是语音结尾，幅度已趋零，也替换掉）
+    for (; i < sample_count; ++i) {
+        int16_t abs_val = samples[i] < 0 ? -samples[i] : samples[i];
+        if (abs_val < kSilenceThreshold) samples[i] = 0;
+    }
+}
+
+// ----------------------------------------------------------------------
+// 工具函数：内存中的 RIFF WAV 头跳过
+// ----------------------------------------------------------------------
+// Qwen-TTS 非流式接口返回的 WAV 下载链接指向完整的 RIFF WAV 文件
+// （"RIFF" + 长度 + "WAVE" + "fmt " chunk + "data" chunk header，约 44B）。
+// 若不剥头直接送 I2S，前 ~44 字节会被当作 22 个 int16 PCM 样本播出 ——
+// "RIFF\xAF\xFF\xFF\x7F" 这种字节会形成接近满刻度的方波 → 起始大爆音 +
+// 整段听感全是杂音。
+//
+// 本函数操作下载到 PSRAM 的完整 WAV 内存 buffer，纯指针扫描，零 I/O 等待。
+//
+// @param buf 累积的 PCM/WAV 字节流首地址
+// @param len buf 的总长度
+// @return 若是 WAV 流，返回 data 段在 buf 中的起始偏移；
+//         若不是 WAV（裸 PCM 或字节不足），返回 0
+static size_t SkipWavHeader(const uint8_t* buf, size_t len) {
+    if (buf == nullptr || len < 12) return 0;
+    // 必须以 "RIFF"....+"WAVE" 开头才认为是 WAV
+    if (buf[0] != 'R' || buf[1] != 'I' || buf[2] != 'F' || buf[3] != 'F' ||
+        buf[8] != 'W' || buf[9] != 'A' || buf[10]!= 'V' || buf[11]!= 'E') {
+        return 0;
+    }
+    // 顺序扫描 chunk header（id 4B + size 4B 小端），遇到 "data" 即返回其后偏移
+    size_t pos = 12;
+    const int kMaxChunks = 8;  // 防御异常 buffer 无限循环
+    for (int i = 0; i < kMaxChunks && pos + 8 <= len; ++i) {
+        const uint8_t* hdr = buf + pos;
+        uint32_t size = (uint32_t)hdr[4]
+                      | ((uint32_t)hdr[5] << 8)
+                      | ((uint32_t)hdr[6] << 16)
+                      | ((uint32_t)hdr[7] << 24);
+        if (hdr[0] == 'd' && hdr[1] == 'a' && hdr[2] == 't' && hdr[3] == 'a') {
+            // 找到 data chunk，返回其负载起始偏移
+            return pos + 8;
+        }
+        // 流式 WAV 的 fmt/LIST 等 chunk size 字段可能填占位的超大值；
+        // 一旦发现 size 越界，按"无法继续解析"放弃跳过（当裸 PCM 处理）。
+        if (size > len || pos + 8 + size > len) {
+            return 0;
+        }
+        pos += 8 + size;
+    }
+    return 0;  // 8 个 chunk 内未找到 data，放弃
 }
 
 // ----------------------------------------------------------------------
@@ -186,89 +397,115 @@ bool initTTS() {
         return false;
     }
 
+    // 分配 PCM 累积缓冲到 PSRAM（192KB，占满内部 DRAM .bss 会链接报错）
+    // heap_caps_malloc 比 EXT_RAM_ATTR 更可靠：后者在 PSRAM 未配置时是空宏会回落 DRAM，
+    // 而 heap_caps_malloc(MALLOC_CAP_SPIRAM) 在 PSRAM 不可用时会返回 nullptr（可检测）。
+    if (s_pcm_accum_buf == nullptr) {
+        s_pcm_accum_buf = (uint8_t*)heap_caps_malloc(kPcmAccumBufSize, MALLOC_CAP_SPIRAM);
+        if (s_pcm_accum_buf == nullptr) {
+            // PSRAM 不可用时 fallback 到内部堆（可能导致 DRAM 紧张，仅作兜底）
+            DEBUG_PRINTLN("[TTS] 警告: PSRAM 分配失败，尝试内部堆（可能内存不足）");
+            s_pcm_accum_buf = (uint8_t*)malloc(kPcmAccumBufSize);
+        }
+        if (s_pcm_accum_buf == nullptr) {
+            DEBUG_PRINTLN("[TTS] 错误: PCM 缓冲分配彻底失败，TTS 不可用");
+            i2s_driver_uninstall(I2S_NUM_0);
+            return false;
+        }
+        DEBUG_LOG("[TTS] PCM 累积缓冲已分配: %u B @ 0x%08X",
+                  (uint32_t)kPcmAccumBufSize, (uint32_t)(uintptr_t)s_pcm_accum_buf);
+    }
+
     s_i2sInitialized = true;
     DEBUG_PRINTLN("[TTS] I2S初始化成功 (24kHz, 16bit, Mono)");
+
+#if TTS_CACHE_ENABLE
+    // LittleFS 初始化：formatOnFail=true 首次自动格式化 Flash 分区
+    if (!s_cache_initialized) {
+        if (LittleFS.begin(true)) {
+            // 确保缓存目录存在
+            if (!LittleFS.exists(kTtsCacheDir)) {
+                LittleFS.mkdir(kTtsCacheDir);
+            }
+            s_cache_initialized = true;
+            DEBUG_LOG("[TTS缓存] LittleFS 初始化成功, 总容量=%u B, 已用=%u B",
+                      (uint32_t)LittleFS.totalBytes(), (uint32_t)LittleFS.usedBytes());
+        } else {
+            DEBUG_PRINTLN("[TTS缓存] LittleFS 初始化失败，缓存功能不可用");
+            // 用 ESP-IDF 分区表 API 诊断 Flash 上实际的分区布局
+            const esp_partition_t* spiffs_part =
+                esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                        ESP_PARTITION_SUBTYPE_DATA_SPIFFS, nullptr);
+            if (spiffs_part != nullptr) {
+                DEBUG_LOG("[TTS缓存] Flash 上存在 spiffs 分区: label='%s' offset=0x%X size=%u B (%u KB)",
+                          spiffs_part->label,
+                          (uint32_t)spiffs_part->address,
+                          (uint32_t)spiffs_part->size,
+                          (uint32_t)(spiffs_part->size / 1024));
+                DEBUG_PRINTLN("[TTS缓存] spiffs 分区存在但 LittleFS 挂载失败");
+                DEBUG_PRINTLN("[TTS缓存]   可能原因: 分区未格式化（formatOnFail 未生效）");
+                DEBUG_PRINTLN("[TTS缓存]   尝试: 用 esptool erase_flash 擦除后重新烧录");
+            } else {
+                DEBUG_PRINTLN("[TTS缓存] *** Flash 上没有 spiffs 分区 ***");
+                DEBUG_PRINTLN("[TTS缓存] 诊断: Arduino Nano ESP32-S3 默认用 dfu-util 上传");
+                DEBUG_PRINTLN("[TTS缓存]   dfu-util 只烧应用固件，不烧分区表！");
+                DEBUG_PRINTLN("[TTS缓存]   即使 IDE 选了 'With SPIFFS partition'，分区表也没写入 Flash");
+                DEBUG_PRINTLN("[TTS缓存] 解决: 需用 esptool 手动烧录一次 bootloader + 分区表");
+                DEBUG_PRINTLN("[TTS缓存]   步骤1: Arduino IDE → Sketch → Export Compiled Binary");
+                DEBUG_PRINTLN("[TTS缓存]   步骤2: 双击 RST 按钮让板子进入 bootloader 模式");
+                DEBUG_PRINTLN("[TTS缓存]   步骤3: 用 esptool.py write_flash 烧录 .partitions.bin 到 0x8000");
+            }
+            // 列出 Flash 上所有 data 分区，辅助诊断
+            esp_partition_iterator_t iter = esp_partition_find(
+                ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, nullptr);
+            if (iter != nullptr) {
+                DEBUG_PRINTLN("[TTS缓存] Flash 上的 data 分区列表:");
+                while (iter != nullptr) {
+                    const esp_partition_t* part = esp_partition_get(iter);
+                    DEBUG_LOG("[TTS缓存]   label='%s' subtype=0x%02X offset=0x%X size=%u KB",
+                              part->label, part->subtype,
+                              (uint32_t)part->address,
+                              (uint32_t)(part->size / 1024));
+                    iter = esp_partition_next(iter);
+                }
+                esp_partition_iterator_release(iter);
+            }
+        }
+    }
+#endif
+
     return true;
 }
 
 
-// ----------------------------------------------------------------------
-// 工具函数：轻量 base64 解码器
-// ----------------------------------------------------------------------
-// Qwen-TTS SSE 流式模式下，每帧 audio.data 是 base64 编码的 int16 PCM。
-// 本实现是标准 RFC 4648 base64 解码，不依赖任何外部库：
-//   - 忽略 '=' 填充字符
-//   - 非法字符跳过（健壮性处理）
-//   - 输出字节数 = floor(valid_input_chars / 4) * 3 + remainder
-//
-// @param src       base64 编码字符串（可不以 '\0' 结尾，由 src_len 控制）
-// @param src_len   base64 字符串长度
-// @param dst       解码输出缓冲区
-// @param dst_len   输出缓冲区容量（需 >= src_len * 3 / 4）
-// @return 实际解码写出的字节数
-static size_t Base64Decode(const char* src, size_t src_len, uint8_t* dst, size_t dst_len) {
-    static const int8_t kDecTable[256] = {
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
-        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-2,-1,-1,
-        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
-        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
-        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
-        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-    };
-    size_t out = 0;
-    uint32_t accum = 0;
-    int bits = 0;
-    for (size_t i = 0; i < src_len && out < dst_len; ++i) {
-        int8_t v = kDecTable[(uint8_t)src[i]];
-        if (v < 0) continue;  // 跳过 '='（-2）和非法字符（-1）
-        accum = (accum << 6) | (uint32_t)v;
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            dst[out++] = (uint8_t)(accum >> bits);
-        }
-    }
-    return out;
-}
-
 /**
- * @brief 云端 TTS：通过阿里 DashScope Qwen-TTS SSE 流式合成并播报。
+ * @brief 云端 TTS：通过阿里 DashScope Qwen-TTS 非流式合成并播报。
  *
- * 新方案（相比旧两步 HTTP，延迟从 3-8s 降至 0.5-1s）：
- *   - 旧方案：POST → 等服务端全段合成完 → 返回 audio.url → 再次 GET 下载 WAV
- *             → 流式写 I2S（两次 TLS 握手，等待全段合成是主要瓶颈）
- *   - 新方案：POST（加 X-DashScope-SSE: enable 头）→ 服务端逐帧推送
- *             base64 编码的 PCM 分片 → 边收边解码边写 I2S
- *             （单次 TLS 握手，首帧到达即可出声）
+ * 流程：POST 请求合成 → 服务端返回 WAV 下载 URL → GET 下载到 PSRAM → 播放。
  *
- * SSE 响应格式（DashScope Qwen-TTS 流式）：
- *   每帧：data: {"output":{"audio":{"data":"BASE64_PCM","url":null},"finish_reason":"null"}}
- *   末帧：data: {"output":{"audio":{"data":"","url":"https://..."},"finish_reason":"stop"}}
+ * 非流式模式的优势（相比旧 SSE 流式方案）：
+ *   - 服务端返回完整 WAV 文件 URL，GET 下载即可，无需 base64 分帧解码
+ *   - 彻底消除帧拼接、字节对齐、PSRAM cache 逐字节写入等问题
+ *   - 代码大幅简化（~160 行 SSE 回调 + Base64Decode → 0）
+ *   - 代价：延迟略高（需等服务端合成完），但短句（≤10 字）差异不明显
  *
- * audio.data 为 base64 编码的 int16 PCM，格式固定 24kHz/16bit/Mono，
- * 与 QWEN_TTS_SAMPLE_RATE 定义一致，无需解析 WAV 头。
- *
- * 内存约束：
- *   PCM 分片解码缓冲区（s_pcm_decode_buf）使用 static 放 .bss 段，
- *   容量 6144 字节对应约 80ms 24kHz 音频，覆盖单帧最大尺寸。
- *   不在栈上分配，避免触发 "Stack canary watchpoint triggered" 复位。
- *
- * @param text 要朗读的文本，非空且长度 <= 600 字符（Qwen-TTS 上限）
+ * @param text      要朗读的文本，非空且长度 <= 600 字符（Qwen-TTS 上限）
+ * @param cache_key  缓存索引键（可选）。非空时用此键查找/写入缓存，
+ *                   解决 LLM 改写不稳定导致缓存永远无法命中的问题。
+ *                   为 nullptr 时退化为以 text 本身作为缓存键。
+ * @param cache_only true 时仅查本地缓存，命中则播放并返回 true，
+ *                   未命中直接返回 false（不走云端合成）。
+ *                   典型用法：在 LLM 改写之前先尝试缓存播放，
+ *                   命中则跳过 LLM + 云端 TTS，延迟从 3-5s 降至 <100ms。
  * @return true 播放完成；false 任一环节失败（调用方可回落到 local_tts_fallback）
  */
-bool speak(const char* text) {
+bool speak(const char* text, const char* cache_key, bool cache_only) {
     if (!s_i2sInitialized) {
         DEBUG_PRINTLN("[TTS] 错误: I2S 未初始化");
+        return false;
+    }
+    if (s_pcm_accum_buf == nullptr) {
+        DEBUG_PRINTLN("[TTS] 错误: PCM 缓冲未分配（PSRAM 不可用），TTS 跳过");
         return false;
     }
     if (text == nullptr || text[0] == '\0') {
@@ -281,35 +518,109 @@ bool speak(const char* text) {
         DEBUG_LOG("[TTS] 错误: 文本过长 (bytes=%u)", (uint32_t)text_len);
         return false;
     }
-    if (!WiFi.isConnected()) {
-        DEBUG_PRINTLN("[TTS] 错误: WiFi 未连接");
-        return false;
+
+    // -------- 缓存查找 --------
+    // cache_key 非空时以其为索引（典型场景：传入原始手势词，避免 LLM 改写
+    // 不稳定导致同一手势每次哈希不同、永远无法命中缓存）。
+    // cache_key 为 nullptr 时退化为以 text 本身为索引（兼容手动 TTS 等场景）。
+    size_t accum_len = 0;
+    bool from_cache = false;
+
+#if TTS_CACHE_ENABLE
+    const char* effective_key = (cache_key != nullptr && cache_key[0] != '\0')
+                                ? cache_key : text;
+    char cache_path[32];
+    BuildCachePath(effective_key, cache_path, sizeof(cache_path));
+
+    accum_len = ReadCache(cache_path, s_pcm_accum_buf, kPcmAccumBufSize);
+    if (accum_len > 0) {
+        from_cache = true;
+        DEBUG_LOG("[TTS] 缓存命中: %s key='%s' (%u B)",
+                  cache_path, effective_key, (uint32_t)accum_len);
+    }
+#endif
+
+    // -------- 缓存未命中 --------
+    if (!from_cache) {
+        // cache_only 模式：仅查缓存，未命中时不走云端，直接返回 false。
+        // 调用方可据此决定是否跳过 LLM 改写（缓存命中 → 跳过 LLM，节省 1-2s）。
+        if (cache_only) {
+            return false;
+        }
+        if (!WiFi.isConnected()) {
+            DEBUG_PRINTLN("[TTS] 错误: WiFi 未连接且缓存未命中");
+            return false;
+        }
+
+        // 构建非流式 POST 请求
+        JsonDocument req_doc;
+        req_doc["model"] = QWEN_TTS_MODEL;
+        JsonObject input = req_doc["input"].to<JsonObject>();
+        input["text"]          = text;
+        input["voice"]         = QWEN_TTS_VOICE;
+        input["language_type"] = QWEN_TTS_LANGUAGE;
+
+        String payload;
+        payload.reserve(256 + text_len);
+        serializeJson(req_doc, payload);
+
+        String auth_header = "Bearer ";
+        auth_header += QWEN_API_KEY;
+
+        DEBUG_LOG("[TTS] 请求合成(非流式): %s", text);
+
+        // 第一步：POST 获取 WAV 下载 URL
+        String response = httpPostJson(QWEN_TTS_ENDPOINT, payload,
+                                       auth_header.c_str(), 30000);
+        if (response.length() == 0) {
+            DEBUG_PRINTLN("[TTS] 错误: 合成请求失败（空响应）");
+            return false;
+        }
+
+        JsonDocument resp_doc;
+        DeserializationError json_err = deserializeJson(resp_doc, response);
+        if (json_err) {
+            DEBUG_LOG("[TTS] 错误: JSON 解析失败: %s", json_err.c_str());
+            return false;
+        }
+
+        const char* audio_url = resp_doc["output"]["audio"]["url"];
+        if (audio_url == nullptr || audio_url[0] == '\0') {
+            const char* err_code = resp_doc["code"];
+            const char* err_msg  = resp_doc["message"];
+            if (err_code) {
+                DEBUG_LOG("[TTS] 服务端错误: code=%s msg=%s",
+                          err_code, err_msg ? err_msg : "(null)");
+            } else {
+                DEBUG_PRINTLN("[TTS] 错误: 响应中无 audio.url");
+                char preview[201] = {0};
+                size_t copy_len = response.length() < 200 ? response.length() : 200;
+                memcpy(preview, response.c_str(), copy_len);
+                DEBUG_LOG("[TTS] 响应预览: %s", preview);
+            }
+            return false;
+        }
+
+        DEBUG_LOG("[TTS] 获取到音频 URL: %.80s...", audio_url);
+
+        // 第二步：GET 下载 WAV 到 PSRAM 缓冲
+        accum_len = httpGetToBuffer(audio_url, s_pcm_accum_buf, kPcmAccumBufSize);
+        if (accum_len == 0) {
+            DEBUG_PRINTLN("[TTS] 错误: WAV 下载失败");
+            return false;
+        }
+        DEBUG_LOG("[TTS] WAV 下载完成: %u B", (uint32_t)accum_len);
+
+        // 写入缓存供下次使用
+#if TTS_CACHE_ENABLE
+        WriteCache(cache_path, s_pcm_accum_buf, accum_len);
+#endif
     }
 
-    // -------- 构建 SSE 流式 POST 请求 --------
-    JsonDocument req_doc;
-    req_doc["model"] = QWEN_TTS_MODEL;
-    JsonObject input = req_doc["input"].to<JsonObject>();
-    input["text"]          = text;
-    input["voice"]         = QWEN_TTS_VOICE;
-    input["language_type"] = QWEN_TTS_LANGUAGE;
-
-    String payload;
-    payload.reserve(256 + text_len);
-    serializeJson(req_doc, payload);
-
-    String auth_header = "Bearer ";
-    auth_header += QWEN_API_KEY;
-
-    DEBUG_LOG("[TTS] 请求合成(SSE流式): %s", text);
-
     // -------- 预切 I2S 采样率到 24kHz --------
-    // SSE 模式下无 WAV 头可解析，采样率由 QWEN_TTS_SAMPLE_RATE 常量保证。
-    // 切换前必须先清零 DMA 缓冲，消除上次播放的残留数据；
-    // 否则旧数据会以新采样率输出，产生"滋滋"杂音。
     bool rate_switched = false;
     if (QWEN_TTS_SAMPLE_RATE != TTS_I2S_DEFAULT_SAMPLE_RATE) {
-        i2s_zero_dma_buffer(I2S_NUM_0);  // 清零 DMA 缓冲，防止残留数据产生杂音
+        i2s_zero_dma_buffer(I2S_NUM_0);
         esp_err_t err = i2s_set_sample_rates(I2S_NUM_0, QWEN_TTS_SAMPLE_RATE);
         if (err != ESP_OK) {
             DEBUG_LOG("[TTS] 错误: 预切采样率失败 err=%d", (int)err);
@@ -318,161 +629,94 @@ bool speak(const char* text) {
         rate_switched = true;
     }
 
-    // -------- SSE 接收：全量攒 PCM，不在回调里写 I2S --------
-    //
-    // 【重要设计决策：为何不在回调里实时写 I2S】
-    // 回调里 i2s_write(portMAX_DELAY) 在 DMA 满时会阻塞整个任务，
-    // 阻塞期间 httpPostJsonSse 的 TCP 读循环完全停止 → TCP 接收窗口收缩
-    // → 服务端推送降速 → 每帧间隔被拉长，形成恶性循环。
-    // 实测：理论 0.76s 的音频实际耗时 9s（相差 12×），首帧 pcm=6118B
-    // 也证明了服务端多帧数据堆积在 TCP buffer 里等待被读。
-    //
-    // 新方案：回调里只做 base64 解码 + memcpy 到 s_pcm_accum_buf，
-    // SSE 全量读完后再统一写 I2S，TCP 读取不受 I2S DMA 阻塞影响。
-    //
-    // s_pcm_accum_buf 容量：60000 B ≈ 1.25s @ 24kHz/16bit/Mono，
-    // 覆盖绝大多数短句；超长句子截断（不影响 MVP 演示场景）。
-    // static 放 .bss 段，避免 loopTask 栈（8KB）溢出。
-    static uint8_t s_pcm_accum_buf[60000];
-    // s_frame_decode_buf 必须能容纳单帧 base64 解码后的最大 PCM。
-    //   实测 [TTS-SSE-FRAME] b64_len=16350 → 解码后 PCM ≈ 16350×3/4 ≈ 12262 B
-    //   原 6144 B 直接顶到上限，导致每个大帧丢掉 ~6KB PCM → 听不清。
-    //   扩到 16384 B 留 ~33% 余量，覆盖服务端推送更大帧的场景。
-    static uint8_t s_frame_decode_buf[16384];  // 单帧 base64 解码临时缓冲
-    size_t accum_len = 0;
-    bool stream_finished = false;
-
-    auto on_sse_line = [&](const String& line) -> bool {
-        // SSE 格式：跳过非 data: 开头的行（注释行、空行、id:/event: 等）
-        if (!line.startsWith("data:")) {
-            return true;
-        }
-        const char* json_str = line.c_str() + 5;
-        while (*json_str == ' ') ++json_str;
-
-        // [DONE] 标志（部分 SSE 实现会额外发送）
-        if (strcmp(json_str, "[DONE]") == 0) {
-            stream_finished = true;
-            return false;
-        }
-
-        // 检测 finish_reason（用 strstr 避免把 5KB+ base64 字符串塞入 JsonDocument 堆）
-        if (strstr(json_str, "\"finish_reason\":\"stop\"") != nullptr) {
-            stream_finished = true;
-        }
-
-        // 提取 audio.data（base64 PCM）：用 strstr 直接定位，避免 JsonDocument 复制大字符串
-        const char* data_key = strstr(json_str, "\"data\":\"");
-        if (data_key == nullptr) {
-            return !stream_finished;
-        }
-        const char* b64_start = data_key + 8;  // 跳过 "data":"
-        if (*b64_start == '"') {
-            // data="" 空串，末帧正常现象
-            return !stream_finished;
-        }
-
-        // 找 base64 字符串结尾（下一个未转义的 '"'）
-        const char* b64_end = b64_start;
-        while (*b64_end != '\0' && *b64_end != '"') {
-            if (*b64_end == '\\') b64_end++;  // 跳过转义字符
-            if (*b64_end != '\0') b64_end++;
-        }
-        size_t b64_len = (size_t)(b64_end - b64_start);
-        if (b64_len == 0) {
-            return !stream_finished;
-        }
-
-        // [DIAG] 打印 base64 字符串首尾各 16 字节，验证数据是否被破坏。
-        //   合法 base64 字符仅包含 [A-Za-z0-9+/=]，若出现其他字符（如 \\、{、空格）
-        //   说明上游 line_buf / 转义跳过逻辑切错了边界，PCM 必乱码。
-        {
-            char head[17] = {0};
-            char tail[17] = {0};
-            size_t head_n = b64_len < 16 ? b64_len : 16;
-            size_t tail_n = b64_len < 16 ? b64_len : 16;
-            memcpy(head, b64_start, head_n); head[head_n] = '\0';
-            memcpy(tail, b64_start + b64_len - tail_n, tail_n); tail[tail_n] = '\0';
-            DEBUG_LOG("[TTS-SSE-B64] len=%u head=\"%s\" tail=\"%s\"",
-                      (uint32_t)b64_len, head, tail);
-        }
-
-        // base64 解码到临时帧缓冲
-        size_t pcm_bytes = Base64Decode(b64_start, b64_len,
-                                        s_frame_decode_buf, sizeof(s_frame_decode_buf));
-
-        // [DIAG] 每帧 base64 长度 + 解码出的 PCM 字节数 + 解码 buf 容量
-        //   - b64_len 接近 sizeof(s_frame_decode_buf)*4/3 → 解码 buf 太小，PCM 被截
-        //   - pcm_bytes / b64_len 应约等于 0.75 (base64 编码率)
-        DEBUG_LOG("[TTS-SSE-FRAME] b64_len=%u pcm=%u buf=%u",
-                  (uint32_t)b64_len, (uint32_t)pcm_bytes,
-                  (uint32_t)sizeof(s_frame_decode_buf));
-
-        if (pcm_bytes == 0) {
-            return !stream_finished;
-        }
-
-        // 追加到累积缓冲（超出容量时截断，记录警告）
-        size_t space = sizeof(s_pcm_accum_buf) - accum_len;
-        if (pcm_bytes > space) {
-            DEBUG_LOG("[TTS-SSE] 警告: 累积缓冲将满, 截断 %u B", (uint32_t)(pcm_bytes - space));
-            pcm_bytes = space;
-        }
-        if (pcm_bytes > 0) {
-            memcpy(s_pcm_accum_buf + accum_len, s_frame_decode_buf, pcm_bytes);
-            accum_len += pcm_bytes;
-        }
-
-        return !stream_finished;
-    };
-
-    DEBUG_LOG("[TTS-SSE] 开始接收 SSE 音频流...");
-    int http_code = httpPostJsonSse(QWEN_TTS_ENDPOINT, payload,
-                                    auth_header.c_str(), on_sse_line);
-    DEBUG_LOG("[TTS-SSE] SSE 接收完成, 累积 PCM=%u B, HTTP=%d",
-              (uint32_t)accum_len, http_code);
-
-    // -------- 统一写 I2S 播放（SSE 读取已结束，不再有 TCP 竞争）--------
+    // -------- 写 I2S 播放 --------
     bool got_any_audio = false;
     size_t total_written = 0;
 
     if (accum_len > 0) {
-        // 软件增益（gain=1.0 时编译器优化为空）
-        ApplyGain(s_pcm_accum_buf, accum_len);
+        // 剥掉 RIFF WAV 头（标准 44 字节）
+        const size_t pcm_offset = SkipWavHeader(s_pcm_accum_buf, accum_len);
+        const size_t pcm_len    = accum_len - pcm_offset;
+        if (pcm_offset > 0) {
+            DEBUG_LOG("[TTS] 检测到 WAV 头，跳过前 %u 字节，有效 PCM=%u B",
+                      (uint32_t)pcm_offset, (uint32_t)pcm_len);
+        }
+        uint8_t* pcm_buf = s_pcm_accum_buf + pcm_offset;
 
-        // 启动 I2S 时钟：i2s_start 之前 MAX98357A 处于静音状态（无 BCLK 时自动静音）。
-        // 播放前再 start，确保 DMA 缓冲是干净的零值，消除启动时的"噗"声。
-        i2s_zero_dma_buffer(I2S_NUM_0);
+        // 软件增益（gain=1.0 时编译器优化为空）
+        ApplyGain(pcm_buf, pcm_len);
+
+        // 软件静音门控：消除停顿段"嗷"变音
+        //   Qwen-TTS 在逗号/句号停顿处生成的 PCM 幅度骤降到接近零（±10~±200），
+        //   MAX98357A 9dB 增益放大量化底噪 → 可听见的低频"嗷"变音。
+        //   门控把低于阈值的连续低幅度段替换为严格零值，功放底噪消失。
+        ApplySilenceGate(pcm_buf, pcm_len);
+
+        // 启动 I2S 时钟，再清零 DMA 缓冲：
+        //   i2s_zero_dma_buffer() 必须在 I2S running 状态下调用才能真正写零。
+        //   若在 i2s_stop() 后调用，DMA 描述符已挂起，清零不生效；上次播放
+        //   末尾残留的非零样本会在 i2s_start() 后的第一个 DMA 周期立即输出
+        //   → 听到播放前一声短促杂音。
+        //   正确顺序：先 start（BCLK 恢复）→ 再 zero_dma（清掉残留）→ 再写静音预热。
         i2s_start(I2S_NUM_0);
+        i2s_zero_dma_buffer(I2S_NUM_0);
+
+        // MAX98357A 冷启动静音预热：
+        //   功放从 BCLK 停止 → BCLK 启动时内部放大器需要约 100-150ms 稳定，
+        //   这段时间直接播 PCM 会把第一个字的声母（高频能量）叠加在冷启动
+        //   冲击噪声上，听感是首字被"噗"声覆盖或音色严重失真。
+        //   写入 100ms 零值静音帧让功放充分预热后，再送真实 PCM。
+        //   kWarmupBytes 必须是 4 的倍数（I2S DMA 描述符对齐要求）。
+        {
+            const size_t kWarmupBytes = (24000u * 2u * 100u) / 1000u;  // 100ms @ 24kHz/16bit
+            uint8_t warmup_chunk[256];
+            memset(warmup_chunk, 0, sizeof(warmup_chunk));
+            size_t warmup_remaining = kWarmupBytes;
+            while (warmup_remaining > 0) {
+                size_t once = warmup_remaining < sizeof(warmup_chunk)
+                              ? warmup_remaining : sizeof(warmup_chunk);
+                size_t written = 0;
+                i2s_write(I2S_NUM_0, warmup_chunk, once, &written, portMAX_DELAY);
+                total_written += written;
+                warmup_remaining -= once;
+            }
+        }
 
         // 分块写 I2S，每块 4096 字节对齐 DMA 描述符大小
         const size_t kI2SChunk = 4096;
         size_t offset = 0;
-        while (offset < accum_len) {
-            size_t chunk = accum_len - offset;
+        while (offset < pcm_len) {
+            size_t chunk = pcm_len - offset;
             if (chunk > kI2SChunk) chunk = kI2SChunk;
             size_t bytes_written = 0;
-            i2s_write(I2S_NUM_0, s_pcm_accum_buf + offset, chunk,
+            i2s_write(I2S_NUM_0, pcm_buf + offset, chunk,
                       &bytes_written, portMAX_DELAY);
             total_written += bytes_written;
             offset += chunk;
         }
         got_any_audio = true;
-        DEBUG_LOG("[TTS] I2S 写入完成, %u bytes", (uint32_t)total_written);
+        DEBUG_LOG("[TTS] I2S 写入完成, %u bytes (含 100ms 预热)", (uint32_t)total_written);
 
-        // 精确等待 DMA 排空：
-        //   等待时间 = 实际写入字节 / (采样率 × 字节/样本)
-        //   加上 DMA 缓冲深度对应的时长，确保最后一帧完全输出到功放。
-        //   DMA 深度：16 × 1024 samples × 2 bytes = 32768 B @24kHz ≈ 682ms
+        // 精确等待 DMA 排空后立即 stop：
+        //
+        // 【修复：拖音/杂音根因】
+        // i2s_write() 是把数据 enqueue 到 DMA 队列，返回时数据尚未输出完。
+        // 需要等待 total_written 字节全部从 DMA 输出到功放，然后立即 i2s_stop()。
+        //
+        // 旧方案取 max(play_ms, dma_drain=682ms)，对短词（如"不。"total_written=383ms）
+        // 等了 782ms，I2S 在语音结束后还多运行 ~400ms 输出零值——MAX98357A 在 BCLK
+        // 持续但信号为零时功放偏置噪声持续输出，听感即为"拖音/杂音"。
+        //
+        // 新方案：wait_ms = total_written 对应的播放时长 + 50ms 安全余量
+        //   total_written 已是 DMA 里所有待输出数据（warmup + PCM）的字节数，
+        //   等这么久后数据恰好全部输出完，立即 stop 可消除拖音。
         uint32_t play_ms = (uint32_t)((total_written * 1000UL) / (QWEN_TTS_SAMPLE_RATE * 2));
-        uint32_t dma_drain_ms = (uint32_t)(32768UL * 1000UL / (QWEN_TTS_SAMPLE_RATE * 2));
-        uint32_t wait_ms = (play_ms < dma_drain_ms) ? dma_drain_ms : play_ms;
-        wait_ms += 100;  // 额外余量，防止末尾被截断
-        DEBUG_LOG("[TTS] 等待 DMA 排空 %u ms (播放 %u ms + DMA %u ms)",
-                  wait_ms, play_ms, dma_drain_ms);
+        uint32_t wait_ms = play_ms + 50u;  // 50ms 安全余量防末尾样本被截
+        DEBUG_LOG("[TTS] 等待 DMA 排空 %u ms (写入 %u ms + 余量 50ms)",
+                  wait_ms, play_ms);
         delay(wait_ms);
 
-        // 停止 I2S 时钟：让 MAX98357A 自动进入静音状态，消除结尾"滋滋"杂音。
+        // 停止 I2S 时钟：让 MAX98357A 自动进入静音状态，消除结尾拖音。
         // MAX98357A 特性：检测到 BCLK 停止后约 1ms 内自动关闭输出级。
         i2s_stop(I2S_NUM_0);
     }
@@ -487,13 +731,8 @@ bool speak(const char* text) {
         }
     }
 
-    DEBUG_LOG("[TTS] SSE流式播放完成, HTTP=%d, 写入=%u bytes, 收到音频=%s",
-              http_code, (uint32_t)total_written, got_any_audio ? "是" : "否");
-
-    if (http_code != 200) {
-        DEBUG_LOG("[TTS] 错误: HTTP状态码=%d", http_code);
-        return false;
-    }
+    DEBUG_LOG("[TTS] 播放完成, WAV=%u B, 写入=%u bytes, 收到音频=%s",
+              (uint32_t)accum_len, (uint32_t)total_written, got_any_audio ? "是" : "否");
 
     return got_any_audio;
 }
@@ -619,4 +858,38 @@ void playTestTone(int freq, int durationMs) {
     delay(200);
     i2s_stop(I2S_NUM_0);
     DEBUG_PRINTLN("[TTS] 测试音播放结束");
+}
+
+// ======================================================================
+// TTS 缓存管理接口
+// ======================================================================
+
+void clearTtsCache() {
+#if TTS_CACHE_ENABLE
+    if (!s_cache_initialized) {
+        DEBUG_PRINTLN("[TTS缓存] LittleFS 未初始化，无法清除");
+        return;
+    }
+
+    File dir = LittleFS.open(kTtsCacheDir);
+    if (!dir || !dir.isDirectory()) {
+        DEBUG_PRINTLN("[TTS缓存] 缓存目录不存在，无需清除");
+        return;
+    }
+
+    int removed_count = 0;
+    File entry = dir.openNextFile();
+    while (entry) {
+        String path = String(kTtsCacheDir) + "/" + entry.name();
+        entry.close();
+        LittleFS.remove(path);
+        removed_count++;
+        entry = dir.openNextFile();
+    }
+    dir.close();
+
+    DEBUG_LOG("[TTS缓存] 已清除 %d 个缓存文件", removed_count);
+#else
+    DEBUG_PRINTLN("[TTS缓存] 缓存功能未启用 (TTS_CACHE_ENABLE=0)");
+#endif
 }

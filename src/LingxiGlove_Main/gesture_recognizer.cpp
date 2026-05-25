@@ -65,17 +65,19 @@ GestureResult RuleBasedRecognizer::recognize(const SensorData& data) {
         if (!m_inStableState) {
             if (millis() - m_stableStartMs >= GESTURE_STABLE_MS) {
                 m_inStableState = true;
-                // 稳定时间达到阈值，确认手势
-                result.type = detected;
-                result.text = s_gestureTexts[detected];
-                // 置信度与角度偏离程度成正比（越偏离中心越确信）
-                if (detected == GESTURE_HELLO || detected == GESTURE_THANKS) {
-                    result.confidence = min(fabs(pitch) / 90.0f, 1.0f);
-                } else if (detected == GESTURE_GOODBYE || detected == GESTURE_YES) {
-                    result.confidence = min(fabs(roll) / 90.0f, 1.0f);
-                } else {
-                    result.confidence = 0.7f;
-                }
+            }
+        }
+        // 确认后持续输出结果（去重/冷却由仲裁层统一管控）
+        if (m_inStableState) {
+            result.type = detected;
+            result.text = s_gestureTexts[detected];
+            // 置信度与角度偏离程度成正比（越偏离中心越确信）
+            if (detected == GESTURE_HELLO || detected == GESTURE_THANKS) {
+                result.confidence = min(fabs(pitch) / 90.0f, 1.0f);
+            } else if (detected == GESTURE_GOODBYE || detected == GESTURE_YES) {
+                result.confidence = min(fabs(roll) / 90.0f, 1.0f);
+            } else {
+                result.confidence = 0.7f;
             }
         }
     } else {
@@ -100,9 +102,12 @@ GestureRecognizer* createGestureRecognizer() {
 // BimanualRuleRecognizer 实现
 // ============================================================
 
-static const char* s_bimanualGestureTexts[] = {
-    "",     // BIMANUAL_GESTURE_NONE
-    "加油", // BIMANUAL_GESTURE_JIAYOU
+static const char* s_bimanualGestureTexts[BIMANUAL_GESTURE_COUNT] = {
+    "",       // BIMANUAL_GESTURE_NONE
+    "加油",   // BIMANUAL_GESTURE_JIAYOU
+    "一起",   // BIMANUAL_GESTURE_YIQI
+    "我爱你", // BIMANUAL_GESTURE_WOAINI
+    "帮助",   // BIMANUAL_GESTURE_BANGZHU
 };
 
 BimanualRuleRecognizer::BimanualRuleRecognizer()
@@ -116,7 +121,7 @@ void BimanualRuleRecognizer::init() {
     m_stable_start_ms_ = 0;
     m_in_stable_state_ = false;
     DEBUG_PRINTLN("[BimanualGesture] 双手规则识别器初始化完成");
-    DEBUG_PRINTLN("[BimanualGesture] 手势: 双手 pitch > 30° → 加油");
+    DEBUG_PRINTLN("[BimanualGesture] 手势: pitch>30→加油, pitch<-30→一起, roll对称→我爱你, 左托右居中→帮助");
 }
 
 BimanualGestureResult BimanualRuleRecognizer::recognize(const BimanualInput& input) {
@@ -134,11 +139,29 @@ BimanualGestureResult BimanualRuleRecognizer::recognize(const BimanualInput& inp
         return result;
     }
 
-    // 规则判断：双手 pitch 同时超过阈值 → "加油"候选
+    // 规则判断（按优先级：从最具区分度的特征往下匹配，避免双手对称规则
+    // 把不对称姿态吃掉。例如「帮助」要求 master 居中，若先判「加油」会
+    // 在 slave_pitch 抬起且 master_pitch=0 的边界上漏触发）
     BimanualGestureType detected = BIMANUAL_GESTURE_NONE;
-    if (input.master_pitch > BIMANUAL_PITCH_THRESHOLD_DEG &&
-        input.slave_pitch  > BIMANUAL_PITCH_THRESHOLD_DEG) {
+
+    if (input.master_roll > BIMANUAL_ROLL_THRESHOLD_DEG &&
+        input.slave_roll  < -BIMANUAL_ROLL_THRESHOLD_DEG) {
+        // 我爱你：双手交叉置胸口，右手左倾(roll>30°)、左手右倾(roll<-30°)
+        detected = BIMANUAL_GESTURE_WOAINI;
+    } else if (input.slave_pitch > BIMANUAL_HELP_SLAVE_PITCH_DEG &&
+               fabs(input.master_pitch) < BIMANUAL_HELP_MASTER_NEUTRAL_DEG &&
+               fabs(input.master_roll)  < BIMANUAL_HELP_MASTER_NEUTRAL_DEG) {
+        // 帮助：左手掌朝上托举（slave_pitch>30°），右手握拳置左掌心
+        // （master pitch/roll 居中）
+        detected = BIMANUAL_GESTURE_BANGZHU;
+    } else if (input.master_pitch > BIMANUAL_PITCH_THRESHOLD_DEG &&
+               input.slave_pitch  > BIMANUAL_PITCH_THRESHOLD_DEG) {
+        // 加油：双手同时向上抬起（pitch > +30°）
         detected = BIMANUAL_GESTURE_JIAYOU;
+    } else if (input.master_pitch < BIMANUAL_PITCH_DOWN_THRESHOLD_DEG &&
+               input.slave_pitch  < BIMANUAL_PITCH_DOWN_THRESHOLD_DEG) {
+        // 一起：双手同时掌心朝下向前推（pitch < -30°）
+        detected = BIMANUAL_GESTURE_YIQI;
     }
 
     // 防抖：候选手势需持续稳定 BIMANUAL_STABLE_MS 才确认
@@ -147,19 +170,30 @@ BimanualGestureResult BimanualRuleRecognizer::recognize(const BimanualInput& inp
         if (!m_in_stable_state_) {
             if (now - m_stable_start_ms_ >= BIMANUAL_STABLE_MS) {
                 m_in_stable_state_ = true;
-                // 确认手势：置信度取双手 pitch 均值与阈值之比，上限 1.0
-                float avg_pitch = (input.master_pitch + input.slave_pitch) * 0.5f;
-                result.type       = detected;
-                result.text       = s_bimanualGestureTexts[detected];
-                result.confidence = (avg_pitch / 90.0f < 1.0f) ? avg_pitch / 90.0f : 1.0f;
                 DEBUG_LOG("[BimanualGesture] 确认手势: %s  master_pitch=%.1f  slave_pitch=%.1f  age=%lums",
-                          result.text,
+                          s_bimanualGestureTexts[detected],
                           (double)input.master_pitch,
                           (double)input.slave_pitch,
                           (unsigned long)input.slave_frame_age_ms);
             }
         }
-        // 已处于稳定状态：本帧仍持续触发则不重复返回（由调用方的冷却时间管控）
+        // 确认后持续输出结果（去重/冷却由仲裁层统一管控）
+        if (m_in_stable_state_) {
+            result.type = detected;
+            result.text = s_bimanualGestureTexts[detected];
+            // 置信度：按手势主导特征取值，截断到 [0,1]
+            float conf = 0.7f;
+            if (detected == BIMANUAL_GESTURE_BANGZHU) {
+                conf = fabs(input.slave_pitch) / 90.0f;
+            } else if (detected == BIMANUAL_GESTURE_WOAINI) {
+                float avg_roll = (fabs(input.master_roll) + fabs(input.slave_roll)) * 0.5f;
+                conf = avg_roll / 180.0f;
+            } else {
+                float avg_pitch = (input.master_pitch + input.slave_pitch) * 0.5f;
+                conf = fabs(avg_pitch) / 90.0f;
+            }
+            result.confidence = (conf > 1.0f) ? 1.0f : conf;
+        }
     } else {
         // 候选手势变化（或从 NONE 变为有效），重置防抖计时
         if (detected != m_last_detected_) {

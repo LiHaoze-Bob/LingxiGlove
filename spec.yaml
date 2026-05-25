@@ -1,0 +1,359 @@
+# 灵犀手套 Lingxi —— 产品规格元数据（SDD Spec）
+# 本文件是项目的「机器可读契约」，与 doc/SDD_SPEC.md 配套。
+# 任何硬件接线/模块边界/阶段进度变更请同步本文件与 doc/SDD_SPEC.md。
+
+product:
+  name: "LingxiGlove (灵犀手套)"
+  display_name: "Lingxi 智能手语翻译手套"
+  type: "ai_wearable_dual_hand"
+  version: "v1.1-mvp"            # 见 README §开发路线；与里程碑 M2 保持同步
+  competition: "2026 年全国大学生物联网设计竞赛 - Espressif（乐鑫）赛道"
+  status: "MVP 闭环已跑通，正在 P2（弯曲传感器接入）"
+  description: >
+    基于 Arduino Nano ESP32-S3 的双节点（Master/Slave）智能手套，
+    通过 IMU + 弯曲传感器采集手部姿态，端侧规则识别（V1 升级 1D-CNN）+
+    云端 LLM 改写 + Qwen-TTS 语音合成，把手语实时翻译为自然语音。
+
+# ───────────────────────────────────────────────
+# 硬件规格
+# ───────────────────────────────────────────────
+hardware:
+  topology: "dual_node_master_slave"
+  master_node:
+    role: "右手 / 主控 / 语音播报"
+    mcu: "ESP32-S3 (Arduino Nano ESP32, ABX00083)"
+    expansion_board: "Keyestudio KS0564"
+    ram_kb: 512
+    flash_mb: 8
+    cpu_mhz: 240
+    sensors:
+      - name: "mpu6050"
+        type: "6axis_imu"
+        interface: "i2c"
+        address: "0x68"
+        sda_pin: "GPIO11 (A4)"
+        scl_pin: "GPIO12 (A5)"
+      - name: "flex_thumb"
+        type: "single_channel_flex_with_signal_conditioning"
+        interface: "adc"
+        pin: "A0"            # 见 §7.4，避开 A4/A5
+        signal_pin: "AO"
+        notes: "拇指 1 路。其余 4 路待 5 路套件到货补齐。"
+    actuators:
+      - name: "max98357a"
+        type: "i2s_dac_3w"
+        bclk_pin: "GPIO7 (D4)"
+        lrc_pin:  "GPIO8 (D5)"
+        din_pin:  "GPIO9 (D6)"
+    indicators:
+      builtin_led_blue: "GPIO45 (D16) - ESP-NOW 配对成功亮蓝"
+  slave_node:
+    role: "左手 / 数据采集 / ESP-NOW 上报"
+    mcu: "ESP32-S3 (Arduino Nano ESP32, ABX00083)"
+    sensors:
+      - name: "mpu6050"
+        type: "6axis_imu"
+        interface: "i2c"
+        address: "0x68"
+    notes: "Slave 当前不带弯曲传感器与喇叭，单纯 IMU 数据源。"
+  optional_future:
+    - name: "inmp441"
+      purpose: "声学 TDOA 测距（P4 暂缓，仅文档级方案 + Python 仿真）"
+      status: "未到货，未启用"
+
+# ───────────────────────────────────────────────
+# 软件架构
+# ───────────────────────────────────────────────
+software:
+  framework: "arduino"
+  language: "cpp11"
+  toolchain: "arduino_ide_2x"
+  build_system: "arduino_sketch"          # 不使用 PlatformIO/CMake
+  rtos: "freertos"
+  partition: "default.csv"
+  source_root: "src/LingxiGlove_Main"
+  entry_point: "LingxiGlove_Main.ino"
+  conditional_role: "NVS 运行时配置 + 串口 'role master/slave' 切换，单固件双角色"
+  conditional_compile_flags:
+    ENABLE_FLEX_SENSORS:
+      default: 0
+      notes: "P2 完成校准后置 1。开启时引脚与 ADC 上下限必须显式定义，缺失即 #error。"
+    ENABLE_ESPNOW_SYNC:
+      default: 0
+      notes: "MVP 默认关闭，P1 已通过双板验证后可置 1。"
+    DEBUG_MODE:
+      default: 1
+
+  # 模块清单 —— 与 src/LingxiGlove_Main/*.cpp 一一对应
+  modules:
+    - id: sensor_manager
+      files: ["sensor_manager.h", "sensor_manager.cpp"]
+      role: "MPU6050 + Flex ADC 采集；姿态解算（pitch/roll）；校准注入"
+      status: completed
+    - id: gesture_recognizer
+      files: ["gesture_recognizer.h", "gesture_recognizer.cpp"]
+      role: "抽象基类 + RuleBased 实现 + BimanualRule 实现；500ms 防抖、2s 冷却"
+      status: completed
+      successor: "EdgeImpulseRecognizer (P3 训练后接入)"
+    - id: gesture_arbitrator
+      files: ["gesture_arbitrator.h", "gesture_arbitrator.cpp"]
+      role: "统一决策层（方案C）：接收单手/双手 GestureCandidate，双手优先抑制单手，确认窗口 200ms，冷却 2s；模型无关，CNN 可复用"
+      status: completed
+    - id: motion_detector
+      files: ["motion_detector.h", "motion_detector.cpp"]
+      role: "动作/静止门控（加速度方差 + 陀螺仪模长双阈值）"
+      status: completed
+    - id: calibration
+      files: ["calibration.h", "calibration.cpp"]
+      role: "IMU 零偏 + Flex 量程个体校准；Preferences/NVS 持久化"
+      status: completed
+    - id: esp_now_sync
+      files: ["esp_now_sync.h", "esp_now_sync.cpp"]
+      role: "双手 HandFrame (30B, 含 proto_version + frame_type) 同步；信道随 AP；Master 接收 / Slave 上报；ACK 计数"
+      status: completed
+    - id: nvs_config
+      files: ["nvs_config.h", "nvs_config.cpp"]
+      role: "运行时角色（master/slave）/ Wi-Fi 凭证 / 校准参数持久化"
+      status: completed
+    - id: wifi_manager
+      files: ["wifi_manager.h", "wifi_manager.cpp"]
+      role: "WiFi STA 连接 + 断线重连守护"
+      status: completed
+    - id: http_client
+      files: ["http_client.h", "http_client.cpp"]
+      role: "HTTPS GET/POST + URL 编码"
+      status: completed
+    - id: llm_client
+      files: ["llm_client.h", "llm_client.cpp"]
+      role: "Qwen / 百度 ERNIE 双提供商；自然句改写"
+      status: completed
+    - id: tts_player
+      files: ["tts_player.h", "tts_player.cpp"]
+      role: "Qwen-TTS（主）/ 百度 TTS 流式播放；I2S 输出；LittleFS 缓存；PlayPcmInt16 动态采样率"
+      status: completed
+    - id: local_tts_fallback
+      files: ["local_tts_fallback.h", "local_tts_fallback.cpp"]
+      role: "TTS 失败时按 label 匹配离线 PCM；空表降级蜂鸣"
+      status: completed
+    - id: offline_voice_pcm
+      files: ["offline_voice_pcm.h", "offline_voice_pcm.cpp"]
+      role: "离线语音 PCM 表（由 tools/gen_offline_voice_pcm.py 生成）"
+      status: completed
+    - id: accuracy_test
+      files: ["accuracy_test.h", "accuracy_test.cpp"]
+      role: "现场识别准确率统计（混淆矩阵 + LittleFS /acc_test/ CSV 日志 + test 串口命令族）"
+      status: completed
+    - id: secrets
+      files: ["secrets.example.h", "secrets.h"]
+      role: "WiFi 凭证 + DashScope/百度 API Key（secrets.h 不入库）"
+      status: completed
+
+# ───────────────────────────────────────────────
+# AI Pipeline
+# ───────────────────────────────────────────────
+ai_pipeline:
+  current:
+    deployment: "edge_rule + cloud_llm + cloud_tts"
+    edge_recognizer: "rule_based (RuleBasedRecognizer / BimanualRuleRecognizer)"
+    arbitrator: "GestureArbitrator (方案C：双手优先、确认窗口 200ms、冷却 2s)"
+    feature_dim: 11   # 6axis IMU + 5 finger flex（Master 端目前只 1 路有效）
+    sample_rate_hz: 20
+    window_size_frames: 10        # 0.5s
+    debounce_ms: 500
+    cooldown_ms: 2000
+    classes:
+      single_hand: ["你好", "谢谢", "再见", "明白了", "不"]
+      bimanual:    ["加油", "一起", "帮助", "我爱你", "我们走"]
+  planned_v1:
+    edge_recognizer: "edge_impulse_1d_cnn (单手) / dual_stream_cnn (双手)"
+    framework: "tflite_micro via Edge Impulse Arduino library"
+    target_inference_ms: 50
+    target_accuracy: 0.90
+    notes: "P3 阶段在 Edge Impulse Studio 训练，导出 Arduino 库后无缝替换 RuleBasedRecognizer"
+  planned_v2:
+    description: "云端 Sign-Transformer 扩展开放词汇 + 端云分级触发"
+    trigger_condition: "端侧 softmax 置信度低于阈值（阈值由验证集 ROC 决定）"
+
+cloud_services:
+  - name: "qwen_llm_rewrite"
+    provider: "aliyun_dashscope"
+    model: "qwen-turbo / qwen-plus（按 secrets 配置）"
+    purpose: "把手势序列改写为自然中文句"
+    timeout_ms: 5000
+  - name: "qwen_tts"
+    provider: "aliyun_dashscope"
+    purpose: "中文 TTS（主链路）"
+    output_format: "PCM 16k mono"
+  - name: "baidu_tts"
+    provider: "baidu_speech"
+    purpose: "TTS 备用链路（legacy，当前未使用；主链路为 Qwen-TTS）"
+    status: "unused"
+
+# ───────────────────────────────────────────────
+# 端云协同与降级链路（解决 SOLUTION_REVIEW §1.2 风险 4）
+# ───────────────────────────────────────────────
+graceful_degradation:
+  level_1_normal:    "Cloud LLM 改写 → Cloud TTS → I2S 播放"
+  level_2_no_llm:    "跳过 LLM 改写，直接使用规则识别 label → Cloud TTS"
+  level_3_no_cloud:  "LocalTtsFallback 按 label 匹配离线 PCM → I2S 播放"
+  level_4_empty_pcm: "降级蜂鸣（playTestTone 安全兜底）"
+
+# ───────────────────────────────────────────────
+# 性能与资源约束
+# ───────────────────────────────────────────────
+constraints:
+  end_to_end_latency_target_ms: 2000     # 手势触发到首帧 PCM 送 I2S
+  edge_inference_target_ms: 50           # P3 模型上板后
+  espnow_sync_target_ms: 5               # 双手时间戳对齐误差目标，以 P2 实测为准
+  recognition_accuracy_target: 0.90      # P3 模型阶段；MVP 规则版目标 ≥0.85
+  power_budget_mw: 500                   # 全速运行；Light-sleep 下另算
+  offline_capable: true
+  no_dynamic_alloc_in_hot_path: true     # 热路径禁用 new/delete
+  no_exceptions: true                    # 嵌入式禁用异常
+
+# ───────────────────────────────────────────────
+# SDD 工作流与阶段
+# ───────────────────────────────────────────────
+sdd:
+  workflow:
+    - phase: spec
+      deliverable: ["spec.yaml", "doc/SDD_SPEC.md"]
+    - phase: design
+      deliverable: ["doc/DEVELOPMENT.md", "doc/SOLUTION_REVIEW.md", "doc/DOUBLE_HAND_DESIGN.md", "doc/PERFORMANCE_OPTIMIZATION.md"]
+    - phase: implement
+      deliverable: ["src/LingxiGlove_Main/*"]
+    - phase: host_verify
+      deliverable: ["src/tests/test_*"]
+    - phase: target_verify
+      deliverable: ["src/tests/test_speaker", "src/tests/test_acoustic_tdoa", "硬件在环手测"]
+    - phase: optimize
+      deliverable: ["doc/PERFORMANCE_OPTIMIZATION.md"]
+  current_focus: "implement & host_verify (P2)"
+
+phases:
+  - id: P0
+    name: "单手 MVP"
+    status: completed
+    completed_at: "2026-04"
+    notes: "规则识别 + Qwen-TTS 闭环跑通"
+  - id: P1
+    name: "Slave 固件 + ESP-NOW 双板通信"
+    status: completed
+    completed_at: "2026-05-14"
+    acceptance: "Master 串口 'Slave 已连接'，双板 LED 蓝色"
+  - id: P2
+    name: "弯曲传感器（拇指 1 路）接入与校准"
+    status: in_progress
+    priority: "highest"
+    acceptance: "采集模式 CSV flex 列稳定；伸/弯 ADC 差值 > 200 count"
+  - id: P3
+    name: "Edge Impulse 双流 CNN 训练 + 上板替换 RuleBased"
+    status: pending
+    acceptance: "10 类 F1 ≥ 0.85；端侧推理 < 50 ms"
+  - id: P4
+    name: "声学 TDOA 测距（INMP441 + MAX98357A 复用）"
+    status: paused
+    notes: "Python 仿真已完成；评估实物收益后再启动"
+  - id: P5
+    name: "云端 Sign-Transformer 扩词表"
+    status: pending
+  - id: P6
+    name: "端云分级触发 + 降级链路联调"
+    status: pending
+  - id: P7
+    name: "联调 + 答辩材料"
+    status: pending
+
+milestones:
+  - id: M1
+    name: "Slave + ESP-NOW 通信"
+    status: completed
+    date: "2026-05-14"
+  - id: M2
+    name: "弯曲传感器接入 + 校准"
+    status: in_progress
+  - id: M3
+    name: "10 词全演示规则版可跑通"
+    status: pending
+    acceptance: "误识率 < 20%"
+  - id: M4
+    name: "Edge Impulse 模型上板"
+    status: pending
+    acceptance: "准确率 > 90%，推理 < 50 ms"
+
+# ───────────────────────────────────────────────
+# 测试矩阵 —— 与 src/tests/ 实际目录一一对应
+# ───────────────────────────────────────────────
+testing:
+  host_unit_tests:                       # macOS/Linux 上 make 直接跑，无硬件依赖
+    - dir: "src/tests/test_motion_detector"
+      cases: 16
+      status: passing
+    - dir: "src/tests/test_calibration_core"
+      cases: 24
+      status: passing
+    - dir: "src/tests/test_local_tts_fallback"
+      cases: 20
+      status: passing
+    - dir: "src/tests/test_esp_now_sync"
+      cases: 24
+      status: "passing (-Werror -Wpedantic)"
+    - dir: "src/tests/test_bimanual_recognizer"
+      cases: 8
+      status: passing
+    - dir: "src/tests/test_llm_rewrite"
+      status: passing
+    - dir: "src/tests/test_tts_parsers"
+      status: passing
+    - dir: "src/tests/test_arbitrator"
+      status: passing
+  hardware_in_loop_tests:
+    - dir: "src/tests/test_speaker"
+      purpose: "I2S + MAX98357A 自检（PCM birthday/voice）"
+    - dir: "src/tests/test_acoustic_tdoa"
+      purpose: "P4 声学 TDOA 真机 POC（暂缓）"
+  simulation_tools:
+    - file: "tools/acoustic_tdoa_simulate.py"
+      purpose: "TDOA Python 仿真，500 次 Monte Carlo"
+    - file: "tools/gen_offline_voice_pcm.py"
+      purpose: "调云端 TTS 预生成离线兜底 PCM 表"
+    - file: "tools/gen_chirp_pcm.py"
+      purpose: "为 test_acoustic_tdoa 生成 17-19 kHz chirp PCM"
+
+# ───────────────────────────────────────────────
+# 演示词汇清单（与 DEVELOPMENT.md §9 同步）
+# ───────────────────────────────────────────────
+demo_vocabulary:
+  single_hand:
+    - {id: 1, label: "你好",   feature: "pitch↑ + 拇指伸"}
+    - {id: 2, label: "谢谢",   feature: "pitch↓ + 拇指伸"}
+    - {id: 3, label: "再见",   feature: "roll 摆动"}
+    - {id: 4, label: "明白了", feature: "竖拇指 + pitch 居中"}
+    - {id: 5, label: "不",     feature: "握拳 + yaw 摆动 + 拇指弯"}
+  bimanual:
+    - {id: 6,  label: "加油",     feature: "双手 pitch 同相 + 拇指弯"}
+    - {id: 7,  label: "一起",     feature: "双手 pitch 同向 + roll 对称"}
+    - {id: 8,  label: "帮助",     feature: "右拳 + 左托举"}
+    - {id: 9,  label: "我爱你",   feature: "双手交叉静止 500ms"}
+    - {id: 10, label: "我们走",   feature: "双手 pitch 异相摆动", status: "planned (代码待实现)"}
+
+# ───────────────────────────────────────────────
+# 文档索引
+# ───────────────────────────────────────────────
+docs:
+  spec_contract: "doc/SDD_SPEC.md"        # 本规格的散文版总纲（与本 yaml 配套）
+  development_guide: "doc/DEVELOPMENT.md" # 开发指南（接线/调试/串口命令）
+  solution_review: "doc/SOLUTION_REVIEW.md"
+  bimanual_design: "doc/DOUBLE_HAND_DESIGN.md"
+  performance: "doc/PERFORMANCE_OPTIMIZATION.md"
+  user_guide: "doc/USER_GUIDE.md"
+  edge_impulse: "doc/Edge_Impulse_ESP32_S3_训练指南.md"
+  tdoa_results: "doc/acoustic_tdoa_simulation_results.md"
+
+# ───────────────────────────────────────────────
+# 合规与开放性
+# ───────────────────────────────────────────────
+compliance:
+  certifications: []
+  notes: "竞赛项目暂无需认证；后续产品化需考虑 CCC/SRRC + 医疗器械合规边界"
+license: "MIT"

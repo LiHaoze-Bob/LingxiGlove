@@ -23,7 +23,7 @@ LingxiGlove_Main/              ← 项目文件夹（必须与主 .ino 同名）
 ├── wifi_manager.h/.cpp      ← WiFi连接模块
 ├── http_client.h/.cpp       ← 通用HTTP请求封装
 ├── llm_client.h/.cpp        ← LLM大模型接口（支持百度/阿里）
-├── tts_player.h/.cpp        ← 百度TTS + I2S音频播放
+├── tts_player.h/.cpp        ← Qwen-TTS + LittleFS 缓存 + I2S音频播放
 └── README.md                ← 本文档
 ```
 
@@ -65,7 +65,7 @@ ESP32 的 WiFi 和 HTTPClient 库已内置，无需安装。
 弯曲传感器尚未到货，当前版本仅基于 **MPU6050** 验证完整软件链路：
 
 ```
-MPU6050 读取 → 姿态角解算 → 规则手势识别 → 文本 → 百度TTS → I2S播放
+MPU6050 读取 → 姿态角解算 → 规则手势识别 → 文本 → Qwen-TTS → I2S播放
 ```
 
 支持的手势（通过改变手掌姿态触发）：
@@ -142,9 +142,9 @@ CSV 列：`timestamp_ms, ax, ay, az, gx, gy, gz, pitch, roll`（启用弯曲传�
 - 主循环策略：`speak(text)` 失败 → `PlayOfflineVoice(text)` → 两级都失败
   打印日志，**不做蜂鸣兜底**（避免把"无数据"伪装成"正常播报"）
 
-填充离线数据的方法：运行 `tools/gen_offline_voice_pcm.py`（需自行填入百度 TTS
+填充离线数据的方法：运行 `tools/gen_offline_voice_pcm.py`（需填入云端 TTS
 API Key），脚本会：
-1. 对每个输入 label 调用百度 TTS → 16kHz PCM
+1. 对每个输入 label 调用云端 TTS → 16kHz PCM
 2. 生成新的 `offline_voice_pcm.cpp`（不动 `.h`），覆盖原空表
 3. 重新编译上传即可生效
 

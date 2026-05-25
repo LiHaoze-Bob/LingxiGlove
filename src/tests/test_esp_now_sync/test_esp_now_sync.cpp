@@ -58,7 +58,8 @@ int main() {
     constexpr size_t expected_size =
         4  /*master_timestamp_ms*/ +
         2  /*seq_no*/ +
-        2  /*reserved0*/ +
+        1  /*frame_type*/ +
+        1  /*proto_version*/ +
         2 * 6  /*ax..gz*/ +
         2 * FLEX_CHANNEL_COUNT /*flex[]*/;
     EXPECT(sizeof(HandFrame) == expected_size,
@@ -69,8 +70,10 @@ int main() {
            "master_timestamp_ms @ offset 0");
     EXPECT(offsetof(HandFrame, seq_no)              == 4,
            "seq_no @ offset 4");
-    EXPECT(offsetof(HandFrame, reserved0)           == 6,
-           "reserved0 @ offset 6");
+    EXPECT(offsetof(HandFrame, frame_type)           == 6,
+           "frame_type @ offset 6");
+    EXPECT(offsetof(HandFrame, proto_version)        == 7,
+           "proto_version @ offset 7");
     EXPECT(offsetof(HandFrame, ax)                  == 8,
            "ax @ offset 8");
     EXPECT(offsetof(HandFrame, ay)                  == 10, "ay @ offset 10");
@@ -94,7 +97,8 @@ int main() {
     HandFrame sent = {};
     sent.master_timestamp_ms = 0x11223344u;
     sent.seq_no              = 0xABCD;
-    sent.reserved0           = 0;
+    sent.frame_type          = FRAME_TYPE_SENSOR_DATA;
+    sent.proto_version       = HANDFRAME_PROTO_VERSION;
     sent.ax = 1000; sent.ay = -2000; sent.az = 16000;
     sent.gx = -3; sent.gy = 4; sent.gz = -5;
     for (size_t i = 0; i < FLEX_CHANNEL_COUNT; i++) {

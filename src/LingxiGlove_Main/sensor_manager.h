@@ -43,8 +43,8 @@ struct SensorData {
     float gyroZ;    // deg/s
 
     // 解算姿态角（基于加速度计）
-    float pitch;    // 俯仰角，手掌上下倾斜（+ = 朝上）
-    float roll;     // 横滚角，手掌左右倾斜（+ = 左倾）
+    float pitch;    // 俯仰角，手掌上下倾斜（+ = 朝上），范围 ±90°
+    float roll;     // 横滚角，手掌左右倾斜（+ = 左倾），范围 ±180°
 
     // 弯曲传感器原始 ADC 读数 (0~4095)
     // ENABLE_FLEX_SENSORS=0 时 flexValid=false, flex[] 全为 0

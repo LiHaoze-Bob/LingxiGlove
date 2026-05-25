@@ -27,6 +27,17 @@
 
 #include "config.h"   // FLEX_CHANNEL_COUNT, ENABLE_ESPNOW_SYNC
 
+// ------------------- 协议常量 -------------------
+/** 当前 HandFrame 协议版本号。接收端版本不匹配时丢弃并 WARN。 */
+static constexpr uint8_t HANDFRAME_PROTO_VERSION = 1;
+
+/** 帧类型枚举 */
+enum HandFrameType : uint8_t {
+    FRAME_TYPE_SENSOR_DATA = 0,   // 传感器数据帧（默认）
+    FRAME_TYPE_HEARTBEAT   = 1,   // 心跳包（预留）
+    FRAME_TYPE_CONFIG_SYNC = 2,   // 配置同步（预留）
+};
+
 /**
  * @brief 一帧双手同步数据的线上格式 (wire format)
  *
@@ -41,7 +52,8 @@
 struct __attribute__((packed)) HandFrame {
     uint32_t master_timestamp_ms;       // MASTER 主时钟毫秒戳（SLAVE 上报时回填 0，由 MASTER 打戳）
     uint16_t seq_no;                    // 0..65535 循环递增（按 SLAVE 侧采样步进）
-    uint16_t reserved0;                 // 预留对齐（当前永远为 0）
+    uint8_t  frame_type;                // 帧类型：0=传感器数据帧（默认），预留 1=心跳/2=配置同步等
+    uint8_t  proto_version;             // 协议版本号：当前 = 1，接收端版本不匹配时丢弃并 WARN
     int16_t  ax;                        // 加速度原始值 (LSB, ±2g full-scale → 1LSB ≈ 0.000061 g)
     int16_t  ay;
     int16_t  az;

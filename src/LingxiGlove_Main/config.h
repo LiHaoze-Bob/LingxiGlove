@@ -105,6 +105,18 @@
 #define TTS_COOLDOWN_MS         2000    // 两次语音播报之间的最小间隔（毫秒）
 #define SENSOR_READ_INTERVAL    50      // 传感器读取周期（毫秒），约20Hz
 
+// ------------------- 手势仲裁层 (GestureArbitrator) -------------------
+// 仲裁器坐在单手/双手识别器之上，统一决策播报内容。
+// 识别器已自带 500ms 防抖，仲裁器额外加一层确认窗口 + 冷却。
+//
+// ARBITRATOR_CONFIRM_MS：候选需持续此时间才确认播报。
+//   识别器已防抖 500ms，此处仅做帧级抖动保护（200ms ≈ 4 帧）。
+#define ARBITRATOR_CONFIRM_MS   200
+
+// ARBITRATOR_COOLDOWN_MS：播报后冷却期，期间不输出新结果。
+//   与 TTS_COOLDOWN_MS 保持一致，避免重复播报。
+#define ARBITRATOR_COOLDOWN_MS  2000
+
 // ------------------- 动作/静止门控 (MotionDetector) -------------------
 // 目的：手语是"动作流"，静止时刻不应触发识别；在识别器前加一级二值门控，
 //       同时为未来 VAD 风格的动作分割留接口。
@@ -175,8 +187,13 @@
 // ESPNOW_ROLE：烧录时区分 MASTER / SLAVE 固件的唯一宏
 //   0 = MASTER（右手）：连 WiFi + TTS 播报 + 收 Slave 帧 + 双手识别
 //   1 = SLAVE （左手）：仅 ESP-NOW 广播 HandFrame，不走 WiFi / TTS
-// 烧录 SLAVE 时把此宏改为 1，其余配置不变。
-#define ESPNOW_ROLE             0   // 0=MASTER  1=SLAVE
+//
+// 推荐用法：在 sketch 目录下创建 build_opt.h，写入 -DESPNOW_ROLE=0 或 =1，
+//   Arduino 构建系统会自动注入编译选项，无需修改源代码即可切换角色。
+//   模板文件见 build_opt.h.master / build_opt.h.slave。
+#ifndef ESPNOW_ROLE
+#define ESPNOW_ROLE             0   // 默认 MASTER；可通过 build_opt.h 覆盖
+#endif
 
 // ------------------- 双手协同识别阈值 -------------------
 // 以下阈值仅在 ENABLE_ESPNOW_SYNC=1 && ESPNOW_ROLE=0 (MASTER) 时生效。
@@ -191,15 +208,62 @@
 //   具体动作"双手上抬握拳"时 pitch 典型值 40°–70°，阈值 30° 有充足余量。
 #define BIMANUAL_PITCH_THRESHOLD_DEG  30.0f
 
+// BIMANUAL_PITCH_DOWN_THRESHOLD_DEG：双手 pitch 同时低于此负值 → "一起"候选。
+//   动作为双手掌心朝下向前推出，pitch 典型值 -40°~-70°。
+#define BIMANUAL_PITCH_DOWN_THRESHOLD_DEG  (-30.0f)
+
+// BIMANUAL_ROLL_THRESHOLD_DEG：双手 roll 对称偏转的绝对值阈值 → "我爱你"候选。
+//   动作为双手交叉置胸口，右手左倾(roll>0)、左手右倾(roll<0)。
+#define BIMANUAL_ROLL_THRESHOLD_DEG  30.0f
+
 // BIMANUAL_STABLE_MS：双手同时满足条件需持续此时间才触发，防抖用。
 //   与单手 GESTURE_STABLE_MS(500ms) 保持一致，可独立调整。
 #define BIMANUAL_STABLE_MS          500
+
+// BIMANUAL_HELP_SLAVE_PITCH_DEG：「帮助」中左手掌朝上托举，pitch 需大于此阈值。
+//   动作"左手掌朝上托举"时 pitch 典型值 +30°~+60°。
+#define BIMANUAL_HELP_SLAVE_PITCH_DEG     30.0f
+
+// BIMANUAL_HELP_MASTER_NEUTRAL_DEG：「帮助」中右手握拳置左掌心，pitch/roll 都需在
+//   ±此阈值的中性区内（避免与「加油」「一起」「我爱你」冲突）。
+#define BIMANUAL_HELP_MASTER_NEUTRAL_DEG  20.0f
+
+// ------------------- 准确率测试模式参数 -------------------
+// 用于 'test <id> <count>' 串口命令进入的离线评测模式（不走 LLM/TTS）。
+// 单次手势的最大等待时长：到点未检测到视为漏报（miss）。给用户足够时间
+// 摆姿势（含 BIMANUAL_STABLE_MS=500ms 的防抖），4000ms 实测够用。
+#define ACCURACY_TEST_SLOT_TIMEOUT_MS   4000
+
+// 单次手势结束后，要求用户回到 STILL 持续此时间才进入下一轮。
+// 防止"误触发→连环误触发"——必须明确放松手再做下一次。
+#define ACCURACY_TEST_REST_HOLD_MS      400
+
+// 单次测试会话最多支持的手势次数（用于栈上数组上限）。
+#define ACCURACY_TEST_MAX_ATTEMPTS      50
 
 // MPU6050 加速度/陀螺仪原始值 → pitch 角度换算比例（FullScale ±2g, 16384 LSB/g）
 // 用于 HandFrame 里的 int16 原始值重建 pitch（MASTER 侧换算 Slave 的原始帧）：
 //   pitch_deg = atan2(-ax_raw / 16384.0, az_raw / 16384.0) * (180 / PI)
 // 此常量由 HandFrame 的 IMU 量程决定，不随实测而变化。
 #define MPU6050_ACCEL_SCALE_G       16384.0f  // LSB per g (±2g full scale)
+
+// ------------------- ESP-NOW LED 指示灯 -------------------
+// 启用后，SLAVE 每成功发送一帧 toggle LED，MASTER 每收到一帧 toggle LED。
+// 20Hz 帧率下 LED 约 10Hz 闪烁，肉眼可见"常亮"效果；通信中断则 LED 停止变化。
+// 使用板载 LED_BUILTIN（Arduino Nano ESP32-S3 = GPIO48 / D13），无需外接硬件。
+#define ESPNOW_LED_INDICATOR    1
+// Arduino Nano ESP32-S3 RST 按键旁 RGB LED（三独立 GPIO，低电平有效）：
+//   Red=GPIO46(D14/LED_RED), Green=GPIO0(D15/LED_GREEN), Blue=GPIO45(D16/LED_BLUE)
+// 使用 digitalWrite(LED_BLUE, LOW) 点亮蓝色，HIGH 熄灭。
+#define ESPNOW_LED_PIN          LED_BLUE
+
+// ------------------- TTS 本地缓存 -------------------
+// 启用后，speak() 会优先从 LittleFS 读取已缓存的 WAV 文件；
+// 缓存未命中时走云端合成，合成成功后自动写入缓存供下次使用。
+// 缓存目录：/tts_cache/，文件名为文本 FNV-1a 哈希的 hex 字符串 + ".wav"。
+// 0 = 关闭（每次都走云端，不读写 Flash）
+// 1 = 启用（推荐，10 句演示词汇缓存后 TTS 延迟从 2-4s → <100ms）
+#define TTS_CACHE_ENABLE        1
 
 // ------------------- 调试开关 -------------------
 // 设为 1 开启详细日志，设为 0 关闭
@@ -222,7 +286,7 @@
   #define DEBUG_LOG(fmt, ...)  do {                                              \
       char _dbg_buf[256];                                                        \
       int _dbg_n = snprintf(_dbg_buf, sizeof(_dbg_buf) - 1,                    \
-                            "[%lums] " fmt "\n",                                \
+                            "[%lums] " fmt "\r\n",                              \
                             (unsigned long)millis(), ##__VA_ARGS__);            \
       if (_dbg_n > 0) {                                                         \
           if (_dbg_n >= (int)sizeof(_dbg_buf)) _dbg_n = sizeof(_dbg_buf) - 1;  \
