@@ -1,0 +1,553 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================================
+ *  灵犀手套 Web APP — Cyber Cockpit Theme v2
+ *  布局：上Top bar / 左 2/3 对话气泡 / 右 1/3 工程仪表板
+ * ========================================================================== */
+
+:root {
+  --bg-base: #050510;
+  --bg-elev: #0c0c1f;
+  --bg-card: rgba(20, 22, 40, 0.55);
+  --line: rgba(150, 200, 255, 0.10);
+  --line-strong: rgba(0, 229, 255, 0.35);
+  --text-primary: #e6f0ff;
+  --text-dim: rgba(220, 235, 255, 0.55);
+  --text-mute: rgba(180, 200, 230, 0.35);
+  --accent: #00e5ff;
+  --accent-2: #00ff88;
+  --accent-warn: #ffaa33;
+  --accent-danger: #ff5555;
+  --bubble-sign: linear-gradient(135deg, #00d8a3 0%, #00b3ff 100%);
+  --bubble-speech: rgba(255, 255, 255, 0.08);
+
+  --mono: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  color: var(--text-primary);
+  background:
+    radial-gradient(1200px 700px at 15% 20%, rgba(0, 80, 160, 0.18), transparent 60%),
+    radial-gradient(900px 700px at 90% 80%, rgba(120, 0, 200, 0.12), transparent 60%),
+    var(--bg-base);
+  font-family: -apple-system, 'PingFang SC', 'Segoe UI', system-ui, sans-serif;
+  overflow: hidden;
+  letter-spacing: 0.01em;
+}
+
+/* 微弱 CRT 扫描线点缀 */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(255,255,255,0.012) 0,
+    rgba(255,255,255,0.012) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  z-index: 1;
+}
+
+/* ─── Layout ───────────────────────────────────────────────────────────── */
+.app-shell {
+  width: 100vw;
+  height: 100vh;
+  display: flex; flex-direction: column;
+  position: relative; z-index: 2;
+}
+
+.top-bar {
+  height: 56px;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(10,12,28,0.85), rgba(10,12,28,0.5));
+  backdrop-filter: blur(8px);
+}
+
+.brand { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 600; }
+.brand-mark {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 12px var(--accent), 0 0 24px rgba(0,229,255,0.5);
+}
+.brand-en { color: var(--text-mute); font-weight: 400; font-family: var(--mono); font-size: 13px; }
+
+.top-bar-meta { display: flex; gap: 10px; }
+.top-bar-pill {
+  padding: 4px 12px; border-radius: 999px; font-size: 12px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+
+/* 演示模式开关：button 复用 pill 样式 + 可点击反馈 */
+.top-bar-pill--toggle {
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.top-bar-pill--toggle:hover {
+  background: rgba(255,255,255,0.08);
+}
+.top-bar-pill--toggle-on {
+  background: rgba(80, 200, 120, 0.12);
+  border-color: rgba(80, 200, 120, 0.5);
+  color: #b6f0c8;
+}
+
+/* 顶栏在线/离线色点：绿色=在线、黄色=重连中、红色=离线 */
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+.status-dot--online {
+  background: var(--accent-2);
+  box-shadow: 0 0 8px var(--accent-2);
+  animation: pulse 2s ease-in-out infinite;
+}
+.status-dot--warn {
+  background: var(--accent-warn);
+  box-shadow: 0 0 8px var(--accent-warn);
+}
+.status-dot--offline {
+  background: var(--accent-danger);
+  box-shadow: 0 0 8px var(--accent-danger);
+}
+
+.main-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  min-height: 0;
+}
+
+.chat-area {
+  border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; min-height: 0;
+  background: linear-gradient(180deg, rgba(8,10,24,0.4), rgba(8,10,24,0.1));
+}
+
+/* ─── ChatBubbles ──────────────────────────────────────────────────────── */
+.chat-bubbles {
+  flex: 1; overflow-y: auto;
+  padding: 24px 32px;
+  display: flex; flex-direction: column; gap: 14px;
+  scroll-behavior: smooth;
+}
+.chat-bubbles::-webkit-scrollbar { width: 6px; }
+.chat-bubbles::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+
+.chat-empty {
+  margin: auto; text-align: center; color: var(--text-mute);
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.chat-empty-icon { font-size: 56px; opacity: 0.4; }
+.chat-empty-title { font-size: 18px; color: var(--text-dim); }
+.chat-empty-sub { font-size: 13px; max-width: 340px; line-height: 1.6; }
+
+.bubble-row { display: flex; gap: 10px; align-items: flex-end; max-width: 100%; }
+.bubble-row-left { justify-content: flex-start; }
+.bubble-row-right { justify-content: flex-end; }
+.bubble-row-system { justify-content: center; }
+
+.bubble-col { display: flex; flex-direction: column; max-width: 70%; min-width: 0; }
+.bubble-row-right .bubble-col { align-items: flex-end; }
+
+.bubble-meta {
+  display: flex; gap: 8px; align-items: center;
+  font-size: 11px; color: var(--text-mute);
+  margin-bottom: 4px; font-family: var(--mono);
+}
+.bubble-name { color: var(--text-dim); font-weight: 500; }
+.bubble-conf { color: var(--accent-2); }
+.bubble-latency { color: var(--accent); }
+
+.bubble {
+  padding: 10px 14px; border-radius: 12px;
+  font-size: 16px; line-height: 1.5;
+  word-break: break-word;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+  position: relative;
+}
+.bubble-sign {
+  background: var(--bubble-sign);
+  color: #03161b;
+  font-weight: 500;
+  border-bottom-right-radius: 4px;
+}
+.bubble-speech {
+  background: var(--bubble-speech);
+  color: var(--text-primary);
+  border: 1px solid var(--line);
+  border-bottom-left-radius: 4px;
+}
+.bubble-system {
+  font-size: 12px; padding: 4px 12px; border-radius: 999px;
+  color: var(--text-mute); background: rgba(255,255,255,0.03);
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--mono);
+}
+.bubble-system-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent-warn);
+  box-shadow: 0 0 6px var(--accent-warn);
+}
+
+/* ─── 时间分隔条（按 5 分钟间隔 / 跨日插入） ─────────────────────────────── */
+.chat-divider {
+  display: flex; align-items: center; justify-content: center;
+  margin: 6px 0 2px;
+}
+.chat-divider-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-mute);
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.04);
+  letter-spacing: 0.04em;
+}
+
+/* ─── pending 占位气泡（"识别中…"呼吸光圈 + 三点动画） ──────────────────── */
+.bubble-pending {
+  animation: bubble-breath 1.6s ease-in-out infinite;
+}
+@keyframes bubble-breath {
+  0%, 100% { box-shadow: 0 2px 12px rgba(0,0,0,0.3),
+                       0 0 0 0 rgba(0, 229, 255, 0.0); }
+  50%       { box-shadow: 0 2px 12px rgba(0,0,0,0.3),
+                       0 0 0 6px rgba(0, 229, 255, 0.18); }
+}
+.bubble-pending-tag {
+  color: var(--accent);
+  font-style: italic;
+}
+.bubble-typing {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 18px;
+}
+.bubble-typing-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-dim);
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+.bubble-typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.bubble-typing-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes typing-bounce {
+  0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+  40%           { opacity: 1;    transform: translateY(-3px); }
+}
+
+/* ─── 长消息折叠按钮 ─────────────────────────────────────────────────── */
+.bubble-fold-toggle {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border: none;
+  background: rgba(0, 229, 255, 0.12);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 11px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.bubble-fold-toggle:hover { background: rgba(0, 229, 255, 0.22); }
+.bubble-sign .bubble-fold-toggle {
+  background: rgba(3, 22, 27, 0.18);
+  color: #03161b;
+}
+.bubble-sign .bubble-fold-toggle:hover { background: rgba(3, 22, 27, 0.32); }
+
+.avatar {
+  width: 36px; height: 36px; border-radius: 50%;
+  display: grid; place-items: center;
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+}
+.avatar-sign { background: rgba(0,229,255,0.12); color: var(--accent); }
+.avatar-speech { background: rgba(255,255,255,0.06); color: var(--text-dim); }
+
+/* ─── Dashboard ───────────────────────────────────────────────────────── */
+.dashboard {
+  /* 双独立滚动架构：chat-bubbles 自滚 + dashboard 自滚，互不干扰。
+     - min-height: 0 + height: 100%：让 grid item 在 .main-grid 内被
+       约束高度（grid item 默认 min-height: auto 会被内容撑开使
+       overflow 失效）
+     - 配合 .dash-card { flex-shrink: 0 } 防止卡片被 flex 压扁裁切 */
+  min-height: 0;
+  height: 100%;
+  padding: 12px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex; flex-direction: column; gap: 10px;
+  background: linear-gradient(180deg, rgba(8,10,24,0.7), rgba(8,10,24,0.4));
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.dash-card {
+  /* flex column 容器内默认 flex-shrink:1 会压扁卡片导致内部内容被裁切，
+     必须 flex-shrink:0 强制每张卡保持自然高度，由 .dashboard 自身滚动兜底。 */
+  flex-shrink: 0;
+}
+.dashboard::-webkit-scrollbar { width: 4px; }
+.dashboard::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+.dash-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border-radius: 6px;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid var(--line);
+  font-size: 11px; letter-spacing: 0.08em;
+}
+.dash-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot-online {
+  background: var(--accent-2);
+  box-shadow: 0 0 8px var(--accent-2);
+  animation: pulse 2s ease-in-out infinite;
+}
+.dot-warn { background: var(--accent-warn); box-shadow: 0 0 8px var(--accent-warn); }
+.dot-offline { background: #555; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* 录音超时即将到达上限时的呼吸闪烁（与 Dashboard.tsx::REC_MAX_MS 联动） */
+@keyframes mic-rec-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.dash-header-label { font-weight: 600; color: var(--accent-2); }
+.dash-header-meta { color: var(--text-mute); margin-left: auto; }
+
+/* Cards */
+.dash-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-card);
+  backdrop-filter: blur(6px);
+  overflow: hidden;
+}
+.dash-card-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(0, 229, 255, 0.04);
+}
+.dash-card-title {
+  color: var(--accent); font-weight: 600; font-size: 11px; letter-spacing: 0.12em;
+}
+.dash-card-badge {
+  font-size: 10px; color: var(--text-mute);
+  padding: 2px 8px; border-radius: 4px;
+  background: rgba(255,255,255,0.04);
+}
+.dash-card-body { padding: 10px 12px; }
+
+/* Metrics grid */
+.metric-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+}
+.metric { display: flex; flex-direction: column; gap: 4px; }
+.metric-label { color: var(--text-mute); font-size: 10px; letter-spacing: 0.1em; }
+.metric-value { color: var(--text-primary); font-size: 16px; font-weight: 600; }
+
+.rssi-bars { display: flex; align-items: flex-end; gap: 2px; height: 18px; }
+.rssi-bar {
+  width: 4px;
+  background: rgba(255,255,255,0.15);
+  border-radius: 1px;
+}
+.rssi-bar.active { background: var(--accent); box-shadow: 0 0 4px var(--accent); }
+
+.bat {
+  width: 100%; height: 6px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 3px; overflow: hidden;
+}
+.bat-fill { height: 100%; transition: width 0.4s; }
+
+/* Flex bars */
+.flex-bihands {
+  display: grid;
+  grid-template-columns: 1fr 1px 1fr;
+  gap: 10px;
+  align-items: stretch;
+}
+.flex-divider {
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(0, 229, 255, 0.25),
+    transparent
+  );
+}
+.flex-hand-col { display: flex; flex-direction: column; min-width: 0; }
+.flex-hand-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed rgba(255,255,255,0.06);
+}
+.flex-hand-label {
+  font-family: var(--font-mono);
+  font-size: 10px; letter-spacing: 1px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.flex-hand-right .flex-hand-label { color: var(--accent-2); }
+.flex-hand-finger-legend {
+  font-size: 9px; color: var(--text-mute);
+  letter-spacing: 1px;
+}
+.flex-bars { display: flex; flex-direction: column; gap: 5px; }
+.flex-bar-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.flex-bar-name { width: 14px; color: var(--text-dim); text-align: center; font-size: 10px; }
+.flex-bar-track {
+  flex: 1; height: 8px; position: relative;
+  background: rgba(255,255,255,0.05);
+  border-radius: 2px; overflow: hidden;
+  min-width: 0;
+}
+.flex-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #00b3ff, var(--accent));
+  transition: width 0.2s;
+}
+.flex-bar-fill.bent {
+  background: linear-gradient(90deg, var(--accent-warn), var(--accent-danger));
+  box-shadow: 0 0 8px rgba(255, 107, 53, 0.6);
+}
+.flex-bar-threshold {
+  position: absolute; top: 0; bottom: 0;
+  left: 60%;
+  width: 1px;
+  background: rgba(255,255,255,0.25);
+}
+.flex-bar-val { width: 32px; text-align: right; color: var(--text-mute); font-size: 9px; font-family: var(--font-mono); }
+
+.imu-row {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
+  margin-top: 8px; padding-top: 6px;
+  border-top: 1px dashed var(--line);
+  flex-shrink: 0;
+}
+.imu-row-compact {
+  margin-top: 6px; padding-top: 4px;
+  gap: 4px;
+}
+.imu-cell { text-align: center; }
+.imu-label { color: var(--text-mute); font-size: 10px; }
+.imu-row-compact .imu-label { font-size: 9px; }
+.imu-val { color: var(--accent); font-size: 14px; font-weight: 600; margin-top: 2px; }
+.imu-row-compact .imu-val { font-size: 12px; font-family: var(--font-mono); }
+.flex-hand-right .imu-val { color: var(--accent-2); }
+
+/* Mic */
+.mic-state-line {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  /* 锁定行高，避免 mic-rec-time 字体粗细 / hint 切换造成的微小高度变化 */
+  min-height: 18px;
+}
+.mic-state-dot { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 8px currentColor; }
+.mic-state-label { color: var(--text-dim); flex: 1; }
+.mic-rec-time { color: var(--accent-danger); font-weight: 600; }
+
+.mic-spectrum {
+  display: flex; align-items: flex-end; gap: 3px;
+  height: 44px; margin-bottom: 8px;
+  padding: 4px 0;
+}
+.mic-bar {
+  flex: 1; background: linear-gradient(180deg, var(--accent), #006688);
+  border-radius: 2px 2px 0 0;
+  transition: height 0.05s linear;
+  min-height: 2px;
+}
+.mic-level-row { display: flex; align-items: center; gap: 8px; }
+.mic-level-label { font-size: 10px; color: var(--text-mute); width: 38px; }
+.mic-level-track {
+  flex: 1; height: 6px; background: rgba(255,255,255,0.05);
+  border-radius: 3px; overflow: hidden;
+}
+.mic-level-fill {
+  height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent-warn), var(--accent-danger));
+  transition: width 0.18s ease-out;
+}
+
+/* Gesture */
+.gesture-top {
+  display: flex; align-items: baseline; gap: 10px;
+  padding-bottom: 10px; margin-bottom: 10px;
+  border-bottom: 1px dashed var(--line);
+}
+.gesture-top-label { font-size: 10px; color: var(--text-mute); letter-spacing: 0.1em; }
+.gesture-top-text { font-size: 26px; font-weight: 700; color: var(--accent-2); flex: 1; font-family: -apple-system, 'PingFang SC', sans-serif; }
+.gesture-top-conf { color: var(--accent-2); font-size: 14px; font-weight: 600; }
+
+.gesture-cands { display: flex; flex-direction: column; gap: 6px; }
+.gesture-cand { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.gesture-cand-rank { width: 20px; color: var(--text-mute); }
+.gesture-cand-text { width: 56px; color: var(--accent-2); font-weight: 500; }
+.gesture-cand-track {
+  flex: 1; height: 4px; background: rgba(255,255,255,0.05);
+  border-radius: 2px; overflow: hidden;
+}
+.gesture-cand-fill {
+  height: 100%; background: var(--accent-2);
+  box-shadow: 0 0 4px rgba(0, 255, 136, 0.4);
+  transition: width 0.2s;
+}
+.gesture-cand-conf { width: 36px; text-align: right; color: var(--accent-2); font-size: 10px; font-weight: 500; }
+
+/* candidates 列表的细列头：用 9px 极小字 + 字间距标记每列含义，避免用户误以为
+   进度条是别的指标（如 rank/percentile）。track 列用文字 "置信度" 居左标注。 */
+.gesture-cands-legend {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 9px;
+  color: var(--text-mute);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding-bottom: 2px;
+  border-bottom: 1px dashed rgba(255,255,255,0.06);
+  margin-bottom: 2px;
+}
+.gesture-cand-track-label {
+  flex: 1;
+  font-size: 9px;
+  color: var(--text-mute);
+  letter-spacing: 0.1em;
+}
+
+/* ─── 自适应 ─────────────────────────────────────────────────────────── */
+@media (max-width: 1024px) {
+  .main-grid { grid-template-columns: 3fr 2fr; }
+}
+@media (max-width: 768px) {
+  .main-grid { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+  .chat-area { border-right: none; border-bottom: 1px solid var(--line); }
+}
