@@ -50,8 +50,11 @@ void clearTtsCache();
  * @param pcm          指向 int16 PCM 样本数组，必须非空
  * @param sample_count 样本数（样本数 × 2 = 字节数）。必须 > 0 且 ≤ 10*sample_rate（最多 10 秒）
  * @param sample_rate  采样率，Hz。必须在 [8000, 48000] 区间
+ * @param label        可选的字幕标签（演示模式下作为 tts_audio 首帧的 text 字段，
+ *                     便于 APP 显示原文）。nullptr 表示不带字幕。
  * @return true 成功，false 参数非法或 I2S 未初始化
  */
-bool PlayPcmInt16(const int16_t* pcm, size_t sample_count, uint32_t sample_rate);
+bool PlayPcmInt16(const int16_t* pcm, size_t sample_count, uint32_t sample_rate,
+                  const char* label = nullptr);
 
 #endif // TTS_PLAYER_H

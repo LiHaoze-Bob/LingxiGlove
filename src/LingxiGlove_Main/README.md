@@ -42,6 +42,9 @@ LingxiGlove_Main/              ← 项目文件夹（必须与主 .ino 同名）
 
 - **ArduinoJson** by Benoit Blanchon（用于JSON解析）
   - 菜单：工具 → 管理库 → 搜索 "ArduinoJson" → 安装
+- **WebSockets** by Markus Sattler（端侧 WS server，与 Web App 对接 audio_chunk 推流）
+  - 菜单：工具 → 管理库 → 搜索 "WebSockets" → 选 "by Markus Sattler" → 安装
+  - 仅当 `config.h::ENABLE_WS_SERVER=1` 时需要；置 0 可彻底跳过依赖
 
 ESP32 的 WiFi 和 HTTPClient 库已内置，无需安装。
 
@@ -88,6 +91,21 @@ MPU6050 读取 → 姿态角解算 → 规则手势识别 → 文本 → Qwen-TT
 - `c`：进入**词级采集模式**，暂停识别与 TTS，以 CSV 格式输出每帧传感器数据（供 Edge Impulse 词级手势训练集采集）
 - `f`：进入**指拼采集模式**（Finger Spelling），同样输出 CSV；专门为未来"字母指拼兜底通道"预留接入点。**指拼识别模型尚未训练，该模式当前不进行识别，只做原始数据采集**，避免用词级姿态角规则伪造字母输出
 - `h` 或 `?`：显示命令帮助
+
+#### WebSocket 推流调试命令（mic on/off/status）
+
+为方便单独测试 ESP32 ↔ Web App 的 WS 链路（不依赖 PTT 双击触发），提供如下命令：
+
+- `mic on`：开启 INMP441 录音，并按 32 ms / 块（512 sample × 16-bit / 16 kHz）通过 WS 广播 `audio_chunk` 帧
+- `mic off`：关闭录音；广播 `final=true` 末块 + `mic_state=idle`
+- `mic status`：打印当前推流状态（streaming / running / clients / helloed / seq）
+
+依赖：
+- `config.h::ENABLE_MIC_CAPTURE=1` 且 `config.h::ENABLE_WS_SERVER=1`
+- WiFi 已连上，串口启动日志会打印 `[WS] 监听 ws://<本机IP>:81/ws`
+- Web App 端将 `NEXT_PUBLIC_WS_URL` 配为 `ws://<ESP32 IP>:81/ws` 后即可收到帧
+
+**录音超时保护**：单段录音超过 `WS_MIC_STREAM_MAX_MS`（默认 55s）时，端侧自动触发 `mic off` 并广播 `final=true` 末块——这是为对齐阿里云一句话识别 60s 上限的硬保护。APP 端配合在 50s 时滚动切片提前提交，结果以多段气泡 `[1] [2] ...` 呈现。详见 [doc/DEVELOPMENT.md §7.3 — WebSocket 推流调试](file:///Users/kun.li/Code/Lingxi/LingxiGlove/doc/DEVELOPMENT.md)。
 
 CSV 列：`timestamp_ms, ax, ay, az, gx, gy, gz, pitch, roll`（启用弯曲传感器后追加 `flex0..flex4`）。
 

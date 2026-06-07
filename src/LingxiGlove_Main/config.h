@@ -72,30 +72,66 @@
 //   - 真实 GPIO 引脚号（FLEX_PIN_THUMB/INDEX/MIDDLE/RING/PINKY）
 //   - 实测校准的 ADC 上下界（FLEX_ADC_MIN、FLEX_ADC_MAX）
 // 否则编译会失败（见下方 #if 检查），以强制避免使用未经校准的假设值。
-#define ENABLE_FLEX_SENSORS     0
+#define ENABLE_FLEX_SENSORS     1
 
 #if ENABLE_FLEX_SENSORS
-  // 以下引脚号和校准值必须在实际接线 + 实测后填写。
-  // Arduino Nano ESP32 (ABX00083) 官方引脚映射供参考：
-  //   A0=GPIO1, A1=GPIO2, A2=GPIO3, A3=GPIO4,
-  //   A4=GPIO11 (已用于 I2C SDA), A5=GPIO12 (已用于 I2C SCL),
-  //   A6=GPIO13, A7=GPIO14
-  // 请注意避开 A4/A5（已被 MPU6050 的 I2C 占用）。
-  //
-  // 默认未提供，用户必须在启用开关前自行 #define，以下 #error 兜底：
-  #if !defined(FLEX_PIN_THUMB)  || !defined(FLEX_PIN_INDEX)  || \
-      !defined(FLEX_PIN_MIDDLE) || !defined(FLEX_PIN_RING)   || \
-      !defined(FLEX_PIN_PINKY)
-    #error "ENABLE_FLEX_SENSORS=1 requires FLEX_PIN_THUMB/INDEX/MIDDLE/RING/PINKY defined with real GPIO numbers. Please measure your wiring and define them above this #if block."
+  // FLEX_PINS_MASTER / FLEX_PINS_SLAVE 在 ESPNOW_ROLE 定义之后声明为数组宏，
+  // 运行期由 sensor_manager.cpp 根据 g_runtime_role（NVS）选一套加载。
+  // 此处仅放置与角色无关的 ADC 校准参数。
+
+  // ADC 量程（ESP32-S3 12-bit = 0~4095）
+  // VCC=5V 实测：伸直 raw≈2760，弯曲90° raw≈1180（raw越小=弯曲越大）
+  #ifndef FLEX_ADC_MIN
+    #define FLEX_ADC_MIN    1100   // 完全弯曲 ~1180（留余量）
   #endif
-  #if !defined(FLEX_ADC_MIN) || !defined(FLEX_ADC_MAX)
-    #error "ENABLE_FLEX_SENSORS=1 requires FLEX_ADC_MIN and FLEX_ADC_MAX calibrated from real flex sensor readings (ADC value at finger straight vs fully bent)."
+  #ifndef FLEX_ADC_MAX
+    #define FLEX_ADC_MAX    2800   // 完全伸直 ~2760（留余量）
   #endif
   #ifndef FLEX_ADC_OVERSAMPLE
     // 软件平均采样次数；与物理校准无关，提供合理默认值
     #define FLEX_ADC_OVERSAMPLE 4
   #endif
+  // ------------------- Flex 调试日志开关 -------------------
+  // 开启后 MASTER 与 SLAVE 都会按 ~10 秒一次（每 50 次心跳计数）打印一行
+  //   "[Master/Slave] Flex raw : 拇=… 食=… 中=… 无=… 小=…"
+  // 与 norm 行，便于硬件接线 / 校准范围现场验证。生产环境关掉以减少串口输出。
+  #ifndef ENABLE_FLEX_DEBUG_LOG
+    #define ENABLE_FLEX_DEBUG_LOG 1
+  #endif
 #endif
+
+// ------------------- 手势识别器后端选择 -------------------
+// 在抽象接口 GestureRecognizer 下面切换实现，便于回滚与对照：
+//   RECOGNIZER_BACKEND_RULE         = MPU6050 pitch/roll 硬编码规则（MVP）
+//   RECOGNIZER_BACKEND_EDGE_IMPULSE = Edge Impulse 导出的 .zip 库推理（B 篇）
+//
+// 启用 EDGE_IMPULSE 后端需要：
+//   1. Arduino IDE 已加载导出的 .zip 库；
+//   2. edge_impulse_recognizer.cpp 顶部的 #include 名与库名一致（库名的头文件名
+//      为 `<项目名>_inferencing.h`）。
+//   3. 本宏设为 RECOGNIZER_BACKEND_EDGE_IMPULSE 并重新编译。
+#define RECOGNIZER_BACKEND_RULE          0
+#define RECOGNIZER_BACKEND_EDGE_IMPULSE  1
+#ifndef RECOGNIZER_BACKEND
+#define RECOGNIZER_BACKEND               RECOGNIZER_BACKEND_RULE
+#endif
+
+// ------------------- 数据采集 label 配置 -------------------
+// MODE_CAPTURE 模式下，串口键入数字键 0/1/2/...（最多 0~9）即时切换 label，
+// 串口输出的每行 CSV 末尾追加 label 列，PC 端 capture_serial.py 直接落盘。
+// 默认 label = -1（unlabeled），PC 端 build_dataset.py 会过滤掉这部分行。
+//
+// 扩展类别只需在此处加常量与名称表：
+//   CAPTURE_LABEL_COUNT  ：本次任务总类别数
+//   CAPTURE_LABEL_NAMES  ：编译期常量字符串数组（与 PC 端脚本对齐）
+// 端侧不持久化、不语义化此 label —— 只是 CSV 的一个列，用于训练数据归档。
+#define CAPTURE_LABEL_COUNT     3
+// 名称数组定义放在 sketch 的 .ino 中（C++ 文件）；此处仅暴露宏用于尺寸校验。
+// 名称序号必须与端侧串口键入的数字键、PC 端 dataset 脚本的 class 顺序一一对应：
+//   0 = straight  （手指完全伸直）
+//   1 = half      （半弯，约 45°）
+//   2 = full      （完全握拳/最大弯曲）
+#define CAPTURE_LABEL_UNLABELED  (-1)
 
 // ------------------- 串口配置 -------------------
 #define SERIAL_BAUD 115200
@@ -146,6 +182,91 @@
 // 状态切回 STILL 需要连续满足 EXIT 条件的最少帧数（防抖）
 #define MOTION_STILL_HOLD_FRAMES 6      // 6 * 50ms = 300ms 静止才算真静止
 
+// ------------------- PTT (Push-to-Talk) 双击检测 - 阶段 A -------------------
+// 目的：为"健听者讲话→ASR转文本"提供免按键启动。
+// 阶段 A（MVP）：仅检测两次加速度模长尖峰（双击）+ 握拳手势结束录音，
+//                  不带任何前置约束（不要求手掌张开 / 不要求陀螺仪静止）。
+// 阶段 B（误触发率不可接受时才启用）：叠加 5路 Flex 全张开 + 身体静止。
+// 开关：0 = 关闭 PTT，1 = 启用 PTT 检测器
+#define ENABLE_PTT              1
+
+// PTT 阶段选择：0 = 阶段 A（纯双击），1 = 阶段 B（叠加约束）
+#define PTT_PHASE_B_GUARDS      0
+
+// 双击尖峰阈值：||a| - 1g| 超过该值计为 1 次有效击打。
+// 依据：腰腕 / 腕部轻叩实测峰值 ≈ 1.5~2.5 g；静止时噪声 < 0.05 g。
+#define PTT_TAP_DELTA_G         1.5f    // |a-1g| > 1.5g
+
+// 两次击打间隔窗（ms）。过短会误计身体拖动为二连击，过长会与随意动作压型。
+#define PTT_TAP_GAP_MIN_MS      100
+#define PTT_TAP_GAP_MAX_MS      350
+
+// 击打检测不应连续谭抖，该不应期内忞略后续峰值。
+#define PTT_TAP_REFRACTORY_MS   60
+
+// 握拳结束阈值：RECORDING 状态下，同时有超过该数量的手指 flexNorm 达到握拳阈值
+// 则视为握拳手势。与“握拳 = 5 指全弯”对齐；阈值取 0.7 预留容差。
+#define PTT_FIST_FINGER_THRESHOLD   0.70f
+#define PTT_FIST_MIN_FINGERS        4   // 5 指中至少 4 指超阈
+
+// PTT 状态机超时：防止卡在某个状态不动（如 ARMED 后未出现第 2 击）
+#define PTT_ARMED_TIMEOUT_MS    400     // ARMED 后超时未双击 → 回 IDLE
+#define PTT_RECORDING_MAX_MS    8000    // 录音单次最长时间（安全闸）
+
+// ------------------- 麦克风采集 (INMP441 I2S MIC) -------------------
+// 目的：PTT 期间从 I2S 麦克风采集 PCM，并通过 WS 推送给浏览器端 ASR。
+// 开关：0 = 跳过麦克风初始化（骨架阶段默认）；1 = 启用采集
+#define ENABLE_MIC_CAPTURE       1
+
+// INMP441 引脚与 test_acoustic_tdoa.ino 的 RX 者一致（避免与 MAX98357A 占用的 D4/D5/D6 冲突）。
+#define MIC_I2S_PORT_NUM         1       // 使用 I2S1，I2S0 留给 TTS 播放
+#define MIC_I2S_BCLK             10      // D10
+#define MIC_I2S_LRCLK            11      // D11
+#define MIC_I2S_DIN              12      // D12（INMP441 SD 引脚）
+
+// 采样参数：16 kHz / 16-bit 单声道是 ASR 常见输入格式，带宽 ≈ 32 KB/s，
+// 在 LAN WS 推送下可实时传输。
+#define MIC_SAMPLE_RATE_HZ       16000
+#define MIC_BITS_PER_SAMPLE      16
+#define MIC_CHANNELS             1
+
+// I2S DMA 缓冲设置：8 块 × 256 样本 ≈ 128 ms 延迟上限，足以平滑 WS 抽帧抖动
+#define MIC_DMA_BUF_COUNT        8
+#define MIC_DMA_BUF_SAMPLES      256
+
+// 推送块大小（PCM 字节）：512 样本 × 2 byte = 1024 byte / 帧 ≈ 32 ms，与
+// 前端 websocket onmessage 的处理节奏匹配。
+#define MIC_CHUNK_SAMPLES        512
+
+// ------------------- WebSocket 服务器（端侧） -------------------
+// 主固件作为 WS server 监听浏览器/Web APP 的连接，统一推送 snapshot /
+// mic_state / audio_chunk 等业务帧（参见 LingxiGlove_APP/src/lib/wsProto.ts）。
+//   0 = 关闭（编译/链接零依赖）
+//   1 = 开启（需安装 WebSockets by Markus Sattler 库）
+// 使用方式：开启后 setup 阶段在 WiFi 就绪后自动 listen，loop 内 tick；
+//          串口命令 'mic on' / 'mic off' 启停录音并向所有已连客户端推送 audio_chunk。
+#define ENABLE_WS_SERVER         1
+#define WS_SERVER_PORT           81
+#define WS_SERVER_PATH           "/ws"
+// 协议版本，与 LingxiGlove_APP/src/lib/wsProto.ts 的 WS_PROTO_VERSION 对齐
+#define WS_PROTO_VERSION         1
+
+// mic on 路径上的录音超时上限（ms）。到点后端侧自动 mic off 并广播 final=true，
+// 避免用户忘按 'mic off' 导致：
+//   1) APP 端 PCM 一直累积；
+//   2) 阿里云一句话识别上限 60s，超限会整段失败"白录"。
+// 留 5s 余量给上行/识别耗时；如未来切到流式 ASR 此值可调大。
+#define WS_MIC_STREAM_MAX_MS     55000
+
+// snapshot 帧推送节流（端侧 → APP 周期性遥测）：
+//   - NORMAL    : 10Hz（100ms），未录音时 dashboard 实时刷新
+//   - RECORDING : 5Hz（200ms），mic on 推流期间降频，把带宽让给 audio_chunk
+// 与 LingxiGlove_APP/src/lib/types.ts 的 SystemSnapshot 对齐。
+// 调整原则：必须 < APP 侧 ASR 上限相关的 watchdog；过高（< 50ms）会与 audio_chunk
+// 抢 WiFi 上行带宽（INMP441 32ms/块，约 31 chunks/s）。
+#define WS_SNAPSHOT_INTERVAL_MS_NORMAL    100
+#define WS_SNAPSHOT_INTERVAL_MS_RECORDING 200
+
 // ------------------- 功能开关 -------------------
 // MVP阶段：设为 0 跳过LLM测试，直接走 传感器→识别→TTS 链路
 // 设为 1 则在 setup 中额外测试 LLM 连通性
@@ -193,6 +314,39 @@
 //   模板文件见 build_opt.h.master / build_opt.h.slave。
 #ifndef ESPNOW_ROLE
 #define ESPNOW_ROLE             0   // 默认 MASTER；可通过 build_opt.h 覆盖
+#endif
+
+// ------------------- 左右手 Flex 引脚映射（运行期选择） -------------------
+// 设计决策：本项目角色以 NVS 运行期为准（串口 "role master|slave" 命令 +
+// 重启），所以 flex 引脚也必须运行期选择，不能用编译期 #if ESPNOW_ROLE 分支。
+// sensor_manager.cpp 会在 setFlexPinMapping(g_runtime_role) 被调用时拷贝对应数组
+// 到内部 s_flex_pins[]。两只手套烧同一固件、同一份 build_opt.h 即可。
+//
+// 扩展板物理接口（Keyestudio Nano ESP32 扩展板）：
+//   - 右侧 V/G/S 三排针：A2、A3、A6、A7（4 个独立 V/G/S 三线接口）
+//   - 左侧 Digital&Analog Port（4 针黄色）：A0、A1（共用 1 组 VCC/GND）
+//   - A4/A5 被 I2C 独占（MPU6050），不可用作 flex
+//
+// 官方引脚映射（ABX00083 引脚图）：
+//   A0=GPIO1(ADC1_CH0), A1=GPIO2(ADC1_CH1), A2=GPIO3(ADC1_CH2),
+//   A3=GPIO4(ADC1_CH3), A6=GPIO13(ADC2_CH2), A7=GPIO14(ADC2_CH3)
+//
+// 接线策略（按"飞线一根到左侧 Digital&Analog Port"最短路径优化）：
+//   MASTER（右手）：拇指 A2，食指 A3，中指 A1（左侧 Port），无名指 A6，小指 A7
+//   SLAVE （左手）：拇指 A7，食指 A6，中指 A3，无名指 A1（左侧 Port），小指 A2
+//
+// 注意：
+//   1. 固件 flex[0..4] 始终对应 拇指/食指/中指/无名指/小指（与左右手无关），
+//      故双手联合 26 通道 CSV 的语义不受映射方案影响。
+//   2. IDE Pin Numbering 必须为 "By Arduino Nano Pin"（D-number 模式），
+//      代码中必须用 A 常量，不能硬编码 GPIO 编号。
+//   3. ADC2 (A6/A7) 在 MASTER 连 WiFi 时噪声较大，故右手把 ADC2 留给
+//      贡献最低的无名指/小指；SLAVE 不连 WiFi，左手把 ADC2 留给拇指/食指
+//      可接受（如静止抖动 > 50，把 FLEX_ADC_OVERSAMPLE 提到 8 或 16）。
+#if ENABLE_FLEX_SENSORS
+  // 顺序：拇指 / 食指 / 中指 / 无名指 / 小指（与 FlexFinger 枚举一致）
+  #define FLEX_PINS_MASTER  { A2, A3, A1, A6, A7 }
+  #define FLEX_PINS_SLAVE   { A7, A6, A3, A1, A2 }
 #endif
 
 // ------------------- 双手协同识别阈值 -------------------

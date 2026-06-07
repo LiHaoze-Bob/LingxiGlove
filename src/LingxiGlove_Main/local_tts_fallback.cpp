@@ -34,7 +34,7 @@ bool PlayOfflineVoice(const char* label) {
         DEBUG_LOG("[离线TTS] 匹配 label='%s' samples=%u rate=%u",
                   label, (uint32_t)e.sample_count, (uint32_t)e.sample_rate);
 
-        if (!PlayPcmInt16(e.data, e.sample_count, e.sample_rate)) {
+        if (!PlayPcmInt16(e.data, e.sample_count, e.sample_rate, label)) {
             DEBUG_PRINTLN("[离线TTS] I2S 播放失败");
             return false;
         }

@@ -300,3 +300,31 @@ void PrintCalibration(const CalibrationData& cal) {
 #endif
     DEBUG_PRINTLN("-------------------------");
 }
+
+// ------------------- 机器可读单行（供上位机解析）-------------------
+//
+// 设计原则：
+//   1. 永远输出完整字段（包括未校准时的 0 值），上位机解析器无需处理"缺字段"分支；
+//   2. 紧凑：单行 < 256 字节（DEBUG_LOG 缓冲上限），避免被截断；
+//   3. 数值用空格分隔的 `key=val`，向量用逗号分隔的 5 元素；
+//   4. 行首带固定 `[CAL_INFO]` marker，便于 PC 端正则识别。
+void PrintCalibrationMachineReadable(const CalibrationData& cal) {
+#if ENABLE_FLEX_SENSORS
+    DEBUG_LOG(
+        "[CAL_INFO] flags=%u ax=%.4f ay=%.4f az=%.4f gx=%.4f gy=%.4f gz=%.4f "
+        "fmin=%u,%u,%u,%u,%u fmax=%u,%u,%u,%u,%u",
+        (unsigned)cal.flags,
+        (double)cal.accel_bias_x, (double)cal.accel_bias_y, (double)cal.accel_bias_z,
+        (double)cal.gyro_bias_x,  (double)cal.gyro_bias_y,  (double)cal.gyro_bias_z,
+        (unsigned)cal.flex_min[0], (unsigned)cal.flex_min[1], (unsigned)cal.flex_min[2],
+        (unsigned)cal.flex_min[3], (unsigned)cal.flex_min[4],
+        (unsigned)cal.flex_max[0], (unsigned)cal.flex_max[1], (unsigned)cal.flex_max[2],
+        (unsigned)cal.flex_max[3], (unsigned)cal.flex_max[4]);
+#else
+    DEBUG_LOG(
+        "[CAL_INFO] flags=%u ax=%.4f ay=%.4f az=%.4f gx=%.4f gy=%.4f gz=%.4f",
+        (unsigned)cal.flags,
+        (double)cal.accel_bias_x, (double)cal.accel_bias_y, (double)cal.accel_bias_z,
+        (double)cal.gyro_bias_x,  (double)cal.gyro_bias_y,  (double)cal.gyro_bias_z);
+#endif
+}

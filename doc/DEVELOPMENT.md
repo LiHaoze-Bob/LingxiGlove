@@ -249,6 +249,7 @@ loop():
 3. **需要安装的库**：
    - `ArduinoJson` by Benoit Blanchon（JSON解析）
    - `MPU6050` by Electronic Cats 或直接使用 `Wire.h` 手动驱动
+   - `WebSockets` by Markus Sattler（端侧 WS server；仅当 `config.h::ENABLE_WS_SERVER=1` 时需要）
 
 ### 6.2 API 配置
 
@@ -282,6 +283,7 @@ cp secrets.example.h secrets.h
 | TTS 返回错误 | API Key 无效或额度用尽 | 检查 secrets.h 中的 QWEN_API_KEY |
 | MPU6050 读取失败 | I2C 地址错误或接线松动 | 确认 AD0 接 GND（地址0x68），检查 SDA/SCL |
 | WiFi 连接超时 | 信号弱或密码错误 | 靠近路由器，检查密码中的特殊字符 |
+| flex ADC 读数不随弯曲变化 | IDE Pin Numbering 模式导致 analogRead 读错引脚 | 代码统一用 `A2` 等 A 常量，不硬编码 GPIO 编号（详见 §7.5） |
 
 ### 7.2 调试开关
 
@@ -345,6 +347,41 @@ l 我,吃饭
 
 > **优先级**：NVS 已保存值 > `secrets.h` 编译期宏。
 
+#### WebSocket 推流调试（mic on/off/status）
+
+端侧固件作为 WS server 监听 `ws://<本机IP>:81/ws`（端口/路径见 `config.h::WS_SERVER_PORT/WS_SERVER_PATH`），帧 envelope 与 [LingxiGlove_APP/src/lib/wsProto.ts](file:///Users/kun.li/Code/Lingxi/LingxiGlove_APP/src/lib/wsProto.ts) 完全对齐（`{v, kind, ts, payload}`，`v=WS_PROTO_VERSION=1`）。
+
+为单独验证「ESP32 麦克风 → Web App ASR」链路（不必触发 PTT），新增三条串口命令：
+
+| 命令 | 功能 |
+|------|------|
+| `mic on` | 启动 INMP441 录音，按 32 ms / 块（512 sample × 16-bit / 16 kHz）广播 `audio_chunk` |
+| `mic off` | 停止录音；广播 `final=true` 末块 + `mic_state=idle` |
+| `mic status` | 打印 streaming / running / clients / helloed / seq |
+
+**依赖**：
+- `config.h::ENABLE_WS_SERVER=1` + `ENABLE_MIC_CAPTURE=1`
+- Arduino IDE 已装 `WebSockets by Markus Sattler`（参见 §6.1）
+- WiFi 就绪后串口会打印 `[WS] 监听 ws://192.168.x.x:81/ws`
+
+**Web App 对接**：在 `LingxiGlove_APP/.env.local` 设置：
+
+```
+NEXT_PUBLIC_WS_URL=ws://<ESP32 IP>:81/ws
+```
+
+`mic on` 后浏览器 DevTools Network → WS 应能看到 `hello` / `mic_state` / `audio_chunk` 流入。
+
+**录音超时三层兜底**（防止用户忘按 `mic off` 导致阿里云一句话识别 60s 上限「整段白录」）：
+
+| 层级 | 落点 | 触发条件 | 行为 |
+|---|---|---|---|
+| Lv1 端侧 watchdog | `config.h::WS_MIC_STREAM_MAX_MS=55000` | 单段 ≥ 55s | 自动 `mic off` + 广播 `final=true` |
+| Lv2 UI 提示 | `Dashboard.tsx::REC_WARN_MS/REC_MAX_MS` | 30s/50s | 录音计时器变黄 / 红 + 文案提示 |
+| Lv3a APP 滚动切片 | `useGloveSystem.ts::ASR_SLICE_BYTES≈50s` | 单段 ≥ 50s | 提前 finalize + 提交一段，继续接收下一段 |
+
+> 多段被触发时气泡前缀 `[1]` `[2]` ...；单段录音不加前缀，体验无变化。修改 Lv1 时务必同步 Lv3a 的阈值，保持 Lv3a < Lv1。
+
 #### 准确率测试
 
 | 命令 | 功能 |
@@ -371,25 +408,72 @@ timestamp_ms, ax, ay, az, gx, gy, gz, pitch, roll
 
 > **当前物料说明**：到货的弯曲传感器为**单路模块**（VCC/GND/DO/AO 四引脚），含信号调理板，3.3V/5V 宽压兼容。使用 **AO 口接 ESP32-S3 ADC** 读取模拟电压；DO 口为数字高低电平（阈值由板载电位器调节，精度较低，不推荐用于手势识别）。
 >
-> **接入策略**：目前只有 1 路，优先安装在**拇指**位置（拇指弯曲/伸展是区分握拳与张开最显著的特征）。其余 4 路后续采购 5 路弯曲传感器套件后补齐。
+> **接入策略**：目前已接入 1 路，安装在**左手食指**位置（扩展板 A2 接口）。其余 4 路后续采购补齐。
+>
+> **供电注意**：VCC 接扩展板 **V 排针**（5V）即可。flex 模块内部有分压电路，5V 供电时 AO 输出最高约 2.24V，低于 ESP32-S3 的 3.3V ADC 上限，安全可用。5V 供电动态范围更大（差值 ~1600 count）优于 3.3V（~960 count）。扩展板 V/G/S 排针的 V 列为 5V，无独立 3.3V 排针。
 >
 > **注意**：传感器只能向**印字一侧**弯曲，反向弯曲会损坏传感器。安装时确认弯曲方向与手指弯曲方向一致。典型阻值参考：平直约 37 kΩ，弯曲 90° 约 90 kΩ。
 
 默认 `ENABLE_FLEX_SENSORS=0`，`SensorData.flexValid=false`，不做任何 ADC 读取。按以下步骤启用单路弯曲传感器：
 
 1. 将 AO 引脚接至 ESP32-S3 的任意 ADC 引脚（**避开 I2C 占用的 A4/A5**），VCC 接 3.3V，GND 接地。
-2. 在 `config.h` 的 `#if ENABLE_FLEX_SENSORS` 代码块**上方**定义引脚宏，暂未接入的 4 路可用 `-1` 标记为无效：
+2. 在 `config.h` 的 `#if ENABLE_FLEX_SENSORS` 代码块中定义引脚宏，**必须用 A 常量**（如 `A2`），不能硬编码 GPIO 编号（详见 §7.5）。暂未接入的 4 路可用占位 A 常量：
    ```cpp
-   #define FLEX_PIN_THUMB   A0  // 拇指，已接入
-   #define FLEX_PIN_INDEX   -1  // 未接入
-   #define FLEX_PIN_MIDDLE  -1  // 未接入
-   #define FLEX_PIN_RING    -1  // 未接入
-   #define FLEX_PIN_PINKY   -1  // 未接入
+   #define FLEX_PIN_THUMB   A0  // 占位 — 未接线
+   #define FLEX_PIN_INDEX   A2  // ✅ 左手食指，已接入
+   #define FLEX_PIN_MIDDLE  A3  // 占位 — 未接线
+   #define FLEX_PIN_RING    A6  // 占位 — 未接线
+   #define FLEX_PIN_PINKY   A7  // 占位 — 未接线
    ```
-3. 使用采集模式分别记录拇指**完全伸直**与**完全弯曲**时的 ADC 读数，填入 `FLEX_ADC_MIN` / `FLEX_ADC_MAX`（参考值：伸直约 1200，弯曲约 2800，以实测为准）。
+3. 使用采集模式分别记录手指**完全伸直**与**完全弯曲**时的 ADC 读数，填入 `FLEX_ADC_MIN` / `FLEX_ADC_MAX`。当前实测校准值（VCC=5V）：伸直 raw≈2760（→ `FLEX_ADC_MAX=2800`），弯曲 90° raw≈1180（→ `FLEX_ADC_MIN=1100`）。注意：raw 越小=弯曲越大。
 4. 把 `ENABLE_FLEX_SENSORS` 改为 `1`，重新编译上传。
 
 若开关置 1 却漏写任何宏，编译会被 `#error` 拦截，强制避免使用未经校准的假设值。
+
+### 7.5 踩坑记录：Arduino Nano ESP32 的 analogRead 引脚映射
+
+#### 问题现象
+
+弯曲传感器 AO 接扩展板 A2，万用表量 A2 电压随弯曲明显变化，但 `analogRead(3)` 读数始终固定（~535），不随弯曲变化。
+
+#### 根本原因
+
+Arduino Nano ESP32 IDE 的 **Tools → Pin Numbering** 有两种模式：
+
+| 模式 | `analogRead(A2)` 等价于 | 说明 |
+|------|------------------------|------|
+| By Arduino Nano Pin（D-number） | `analogRead(19)` | ✅ 官方推荐，默认设置 |
+| By GPIO Number（legacy） | `analogRead(3)` | 已标记为遗留模式 |
+
+在 D-number 模式下，`analogRead(3)` 读的是 **D3（GPIO6）**，而不是物理 A2 引脚（GPIO3/D19）。硬编码 GPIO 编号会导致读取完全错误的通道。
+
+#### 排查过程
+
+1. 硬编码 `GPIO3`（即 `analogRead(3)`）→ 读到固定值 ~535，不随弯曲变化
+2. GPIO 扫描（A2 接 GND）→ GPIO1=0，误判 A2=GPIO1
+3. 改用 `analogRead(1)` → 始终读 0（GPIO1 未接 flex）
+4. 万用表确认 A2 电压随弯曲变化，但代码读不到 → 发现 **Pin Numbering 模式不一致**
+5. 用 Arduino `A2` 常量 → 自动解析为 pin 19，成功读到 flex 数据（raw≈1762）
+
+#### 解决方案
+
+**规则**：所有模拟引脚必须用 **A 常量**（`A0`~`A7`），禁止硬编码数字。
+
+```cpp
+// ✅ 正确 — 自动适配任何 Pin Numbering 模式
+#define FLEX_PIN_INDEX  A2
+analogRead(FLEX_PIN_INDEX);
+
+// ❌ 错误 — 仅在特定模式下有效，切换模式即失效
+#define FLEX_PIN_INDEX  3    // 仅 GPIO Number 模式有效
+#define FLEX_PIN_INDEX  19   // 仅 D-number 模式有效
+```
+
+#### 经验教训
+
+- 万用表量到电压变化但代码读不到，首先怀疑 **analogRead 参数是否指向正确的物理引脚**
+- GPIO 扫描中“非零值≠浮空”，有外设输出的引脚也会显示非零值，会干扰判断
+- A 常量是 Arduino 抽象层的正确用法，能自动适配 IDE 的引脚映射模式
 
 ---
 
@@ -441,6 +525,7 @@ Lingxi/                              ← 项目根目录
 │   └── test_tts_parsers/            ← TTS/WAV 解析器测试
 ├── src/tests/test_acoustic_tdoa/    ← Arduino POC（声学 TDOA，暂缓）
 ├── src/tests/test_speaker/          ← Arduino 音频自检
+├── src/tests/test_mic_capture/      ← INMP441 麦克风硬件验证（含接线/I2S配置/判读黄金标准，见目录 README.md）
 └── tools/
     ├── gen_offline_voice_pcm.py     ← 调云端 TTS 生成离线 PCM 表
     ├── gen_chirp_pcm.py             ← 生成 17-19kHz chirp PCM（声学 TDOA 用）
@@ -521,16 +606,18 @@ Lingxi/                              ← 项目根目录
 - **LED 引脚**：Arduino Nano ESP32-S3 板载 RGB LED 是三个独立 GPIO（低电平有效）：Red=GPIO46(D14), Green=GPIO0(D15), Blue=GPIO45(D16)。注意：GPIO48(LED_BUILTIN) 是 SPI SCK，不是 LED。
 - **配对成功提示音**：MASTER 首次收到 Slave 帧时播放两声升调蜂鸣。
 
-#### P2：弯曲传感器接入（当前优先级 🔥🔥🔥）
+#### P2：弯曲传感器接入（左手食指已完成 ✅）
 
-**目标**：将 1 路拇指弯曲传感器纳入手势特征，区分握拳（拇指弯）与张开（拇指伸）两种状态。
+**目标**：将 1 路弯曲传感器纳入手势特征，用于左手食指弯曲检测。
 
-> 传感器已确认为单路模块，自带信号调理板，**无需外接分压电阻**。直接将 AO 引脚接 ESP32-S3 的 ADC 引脚，VCC 接 3.3V，GND 接地即可（详见 §7.4）。
+> 传感器已确认为单路模块，自带信号调理板，**无需外接分压电阻**。直接将 AO 引脚接 ESP32-S3 的 ADC 引脚，VCC 接 5V（扩展板 V 排针），GND 接地即可（详见 §7.4）。
 
-- [ ] 接线：AO → A0（或其他空闲 ADC 引脚，避开 A4/A5），VCC → 3.3V，GND → GND；确认安装方向为印字面朝手背（向手掌侧弯曲）
-- [ ] 按 §7.4 流程完成拇指校准：记录拇指**完全伸直**与**完全握拳**时的 ADC 读数，填入 `config.h` 的 `FLEX_ADC_MIN` / `FLEX_ADC_MAX`
-- [ ] 启用 `ENABLE_FLEX_SENSORS=1`（仅 `FLEX_PIN_THUMB` 有效，其余设 `-1`），在采集模式下验证拇指弯曲列数据稳定，伸直/弯曲 ADC 差值 > 200 count
-- [ ] 更新手势规则（`gesture_recognizer.cpp`）：在姿态角判定上叠加拇指弯曲传感器条件，用于区分"握拳类"（拇指弯，如：不、加油）与"张开类"（拇指伸，如：你好、谢谢、再见）手势
+- [x] 接线：AO → A2（扩展板 A2 接口，左手食指），VCC → 5V（扩展板 V 排针），GND → GND
+- [x] 校准（VCC=5V）：伸直 raw≈2760 → `FLEX_ADC_MAX=2800`，弯曲 90° raw≈1180 → `FLEX_ADC_MIN=1100`
+- [x] 启用 `ENABLE_FLEX_SENSORS=1`，引脚宏用 A 常量（`FLEX_PIN_INDEX=A2`），其余 4 路占位
+- [x] 验证弯曲传感器读数正常：弯曲时 raw 值单调变化，串口日志输出正确（详见 §7.5 踩坑记录）
+- [ ] 更新手势规则（`gesture_recognizer.cpp`）：在姿态角判定上叠加食指弯曲传感器条件
+- [ ] 其余 4 路传感器到货后补齐接线和校准
 
 #### P3：双手手势数据采集与模型训练
 
@@ -571,4 +658,108 @@ Lingxi/                              ← 项目根目录
 
 ---
 
-*文档版本: v2.2 | 更新日期: 2026-05-23*
+## 11. 工具规划 — 图形化数据采集与打标桌面应用（Action Items）
+
+> 记录于 2026-05-27。目标：替代当前 CLI（`tools/capture_serial.py` + 手动数字键打标 + 手动跑 `build_dataset.py`）的多步流程，做成跨平台一站式 GUI，把"采集 → 切窗 → 上传 EI"的效率从分钟级压到秒级。
+
+### 11.1 顶层目标
+
+- **平台**：macOS（首发）+ Windows（同步支持）
+- **形态**：原生桌面应用，单文件分发（`.dmg` / `.exe`），用户无需装 Python
+- **定位**：项目级唯一"训练数据生产线 GUI"，长期维护
+
+### 11.2 必备功能（P0 — 端到端闭环必须有）
+
+| 类别 | 功能 | 备注 |
+|------|------|------|
+| 串口 | 自动检测串口 + USB 拔插自动重连 | macOS 重启后端口名常变 |
+| 串口 | 波特率自适应 + 历史记忆 | — |
+| 串口 | 多设备同时连接（左右手两块板子） | 阶段 2 双手训练用 |
+| 串口 | 实时帧率 / 丢帧率监测，告警阈值可配 | 丢帧 > 10% 红色提示 |
+| 打标 | 键盘热键 0-9 / q/w/e... 扩展到 30+ 类 | 与端侧 `CAPTURE_LABEL_NAMES[]` 同步 |
+| 打标 | 词库 GUI 管理（增删改 / 批量重命名） | 双向同步到 `config.h` 与 EI 项目 |
+| 打标 | 倒计时模式（按空格 → 3-2-1 → 录 N 帧自动停） | 适合离散动作采集 |
+| 打标 | 片段标记模式（先录全程 → 回放拖时间轴打标） | 适合连续动作复盘 |
+| 数据 | 会话浏览器：按日期/采集人/手语词聚合 | 单条可回放 / 删除 / 重打标 |
+| 数据 | 样本统计仪表盘 + 进度条（每类 X / Y 条） | 低于目标高亮 |
+| 导出 | 内嵌切窗，直出 EI CSV / npy / CBOR | 替代 `build_dataset.py` |
+| 云端 | Edge Impulse Ingestion API 直传 | 免手动上传 |
+| 云端 | API Key 用系统钥匙串安全存储 | macOS Keychain / Win Credential |
+
+### 11.3 强烈推荐（P1 — 显著提升体验）
+
+| 类别 | 功能 |
+|------|------|
+| 可视化 | 5 路 flex 实时折线图（滚动 10s） |
+| 可视化 | IMU 3D 姿态实时显示 + 加速度向量 |
+| 可视化 | 类内对比：选 label 叠加显示已采样本均值/方差包络 |
+| 数据 | 质量过滤：自动剔除全 0 / 平直无变化 / 异常突刺帧 |
+| 数据 | 采集人/松紧度/左右手元数据，写入 CSV 头注释 |
+| 云端 | 从 EI 拉项目 label 列表，校验端侧/EI 一致性 |
+| 云端 | 一键调 EI API 启动训练 |
+| 云端 | 模型回流：自动下载 EI `.zip` 到 `output/ei_lib/` |
+| 协作 | 会话 zip 打包导出/导入（含元数据 + 可选 webcam 录像） |
+| 协作 | 采集 recipe 脚本化（"10 词 × 30 次"流程保存复用） |
+
+### 11.4 锦上添花（P2）
+
+- 暗色模式、中英文切换
+- 数据增强预览（噪声/时间扭曲）
+- 崩溃自动落盘 raw 数据到 `output/capture/`，下次启动恢复
+- 实时预测：勾选已训练模型 `.zip`，边采边显示模型在线推理结果（用于发现误识别样本）
+- 双手协同采集时，左右手数据自动按时间戳对齐
+
+### 11.5 技术栈建议
+
+| 方案 | 优点 | 缺点 | 推荐度 |
+|------|------|------|--------|
+| **Tauri (Rust + React)** | 包体小（< 10 MB）、原生性能、串口/USB 稳 | Rust 学习曲线 | ⭐⭐⭐⭐⭐ |
+| Electron + React | 生态成熟、串口库 `serialport` 完善 | 包体大（>100 MB） | ⭐⭐⭐⭐ |
+| Python + PyQt6 | 与现有 `tools/*.py` 复用脚本 | 分发要打 PyInstaller，体积大 | ⭐⭐⭐ |
+| Flutter Desktop | UI 漂亮 | 串口生态弱 | ⭐⭐ |
+
+**首选 Tauri**：包体小、跨平台一致、串口可走 Rust `tokio-serial`，前端复用 [LingxiGlove_APP](file:///Users/kun.li/Code/Lingxi/LingxiGlove_APP) 同栈（React + Tailwind）。
+
+### 11.6 与现有工程的边界
+
+| 现有 | 新工具中的归宿 |
+|------|----------------|
+| [tools/capture_serial.py](file:///Users/kun.li/Code/Lingxi/LingxiGlove/tools/capture_serial.py) | 替代（保留作为 CLI 兜底） |
+| [tools/build_dataset.py](file:///Users/kun.li/Code/Lingxi/LingxiGlove/tools/build_dataset.py) | 内嵌为切窗模块（保留 CLI） |
+| 端侧 MODE_CAPTURE 协议 | **保持不变**（GUI 只是消费方） |
+| `output/capture/session_*/` 目录结构 | **保持不变**（保证回滚兼容） |
+| `config.h` 的 `CAPTURE_LABEL_*` | GUI 通过 IDE 之外的脚本同步生成 |
+
+### 11.7 落地路线图
+
+- **M1**：MVP——单串口 + 实时折线图 + 热键打标 + 落盘 raw.csv（替代 capture_serial.py）
+- **M2**：内嵌切窗 + 会话浏览器 + 样本统计仪表盘
+- **M3**：EI 云端直传 + API Key 安全存储 + 词库 GUI
+- **M4**：双设备并行 + IMU 3D 可视化 + 模型回流
+- **M5**：实时预测 + recipe 脚本 + webcam 录像
+
+启动节点：阶段 2（5 路 sensor 到货后）启动 M1，避免在 1 路验证阶段过度投入。
+
+### 11.8 M1 MVP 实施（已迁移到独立子项目）
+
+**项目位置**：[../../LingxiGlove_Capture/](file:///Users/kun.li/Code/Lingxi/LingxiGlove_Capture)
+
+2026-05-28 升级为 **4 天冲刺**（原 3 天），新增**双手板并行采集**为 P0 必备能力。
+
+| 文档 | 内容 |
+|---|---|
+| [LingxiGlove_Capture/README.md](file:///Users/kun.li/Code/Lingxi/LingxiGlove_Capture/README.md) | 项目定位、技术栈、快速上手、双设备架构总览 |
+| [LingxiGlove_Capture/PLAN.md](file:///Users/kun.li/Code/Lingxi/LingxiGlove_Capture/PLAN.md) | 4 天逐日任务拆分、验收清单、风险拦截 |
+
+**核心架构升级**（vs 原 §11.8 单设备版）：
+- 双串口并行：Rust 端每串口独立 tokio 任务，统一 mpsc 汇聚
+- 时钟对齐：以 PC `SystemTime::now()` 为基准，设备 millis 仅作参考
+- 打标同步：按键事件 PC 端广播到所有活跃 session，左右手 label 完全同步
+- 故障隔离：单设备掉线不影响另一设备继续采集
+- 文件独立：每设备 `raw_<alias>.csv`，下游 `build_dataset.py` 兼容性 100%
+
+**键盘交互**（简化）：`Space` 录制 / `Enter` 结束 / `0-9` 切 label / `-` 复位 / `?` 帮助
+
+---
+
+*文档版本: v2.5 | 更新日期: 2026-05-28*

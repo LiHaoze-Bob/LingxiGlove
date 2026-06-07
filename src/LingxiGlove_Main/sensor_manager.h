@@ -86,4 +86,11 @@ void setImuBias(float ax_bias, float ay_bias, float az_bias,
 // channel 越界或 min_val+8 >= max_val 时直接忽略，避免 calibration 传入非法值导致除零。
 void setFlexRuntimeRange(uint8_t channel, uint16_t min_val, uint16_t max_val);
 
+// 按运行时角色（NVS 加载后的 g_runtime_role）切换 5 路弯曲传感器的物理 ADC 引脚。
+// role: 0 = MASTER（右手映射 FLEX_PINS_MASTER），1 = SLAVE（左手映射 FLEX_PINS_SLAVE）。
+// 必须在 setup() 内、initSensors() 之前/之后均可调用（首次 readSensors 之前生效即可）。
+// 仅在 ENABLE_FLEX_SENSORS=1 时有意义；关闭时本函数为空实现。
+// 其它非 0/1 值会被忽略，保持当前映射不变。
+void setFlexPinMapping(uint8_t role);
+
 #endif // SENSOR_MANAGER_H

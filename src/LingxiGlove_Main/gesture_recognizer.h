@@ -20,6 +20,13 @@ enum GestureType {
     GESTURE_GOODBYE,    // 再见
     GESTURE_YES,        // 是
     GESTURE_NO,         // 不
+    // ---- B 篇：Flex 静态 3 类（由 EdgeImpulseRecognizer 输出）----
+    // 仅在 RECOGNIZER_BACKEND == RECOGNIZER_BACKEND_EDGE_IMPULSE 时会被返回；
+    // 保留枚举是为了与 RuleBasedRecognizer 共用同一抽象接口、同一个
+    // s_gestureTexts 表，避免为 3 类静态手势再引入一套平行枚举。
+    GESTURE_FLEX_STRAIGHT,  // 伸直
+    GESTURE_FLEX_HALF,      // 半弯
+    GESTURE_FLEX_FULL,      // 握拳
     GESTURE_COUNT
 };
 

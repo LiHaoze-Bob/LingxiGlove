@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>灵犀手套 LingxiGlove — 系统架构图 v2.0</title>
+<style>
+  :root {
+    --bg: #f7f9fc;
+    --card-bg: #ffffff;
+    --text: #1a1a2e;
+    --text-secondary: #5a5a7a;
+    --border: #e2e8f0;
+    --accent-master: #2F5496;
+    --accent-slave: #52796F;
+    --accent-cloud: #7C3AED;
+    --accent-edge: #D97706;
+    --accent-sensor: #059669;
+    --accent-audio: #DC2626;
+    --accent-comm: #0891B2;
+    --shadow: 0 4px 20px rgba(0,0,0,0.08);
+    --shadow-hover: 0 8px 30px rgba(0,0,0,0.12);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 40px 24px;
+    min-height: 100vh;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 40px; }
+  header h1 { font-size: 32px; font-weight: 700; color: var(--accent-master); margin-bottom: 8px; }
+  header .subtitle { font-size: 15px; color: var(--text-secondary); }
+  header .badges { margin-top: 16px; display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 500;
+    background: #fff; border: 1px solid var(--border); color: var(--text-secondary);
+  }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .badge.master .dot { background: var(--accent-master); }
+  .badge.slave .dot { background: var(--accent-slave); }
+  .badge.cloud .dot { background: var(--accent-cloud); }
+  .badge.edge .dot { background: var(--accent-edge); }
+
+  /* ===== 硬件拓扑层 ===== */
+  .hw-section {
+    background: var(--card-bg);
+    border-radius: 16px;
+    padding: 28px;
+    margin-bottom: 28px;
+    box-shadow: var(--shadow);
+  }
+  .section-title {
+    font-size: 18px; font-weight: 700; color: var(--accent-master);
+    margin-bottom: 20px; display: flex; align-items: center; gap: 10px;
+  }
+  .section-title .icon { width: 28px; height: 28px; border-radius: 6px; background: var(--accent-master); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 14px; }
+
+  .hw-grid {
+    display: grid;
+    grid-template-columns: 1fr 200px 1fr;
+    gap: 20px;
+    align-items: start;
+  }
+  .hand-card {
+    background: #fff;
+    border-radius: 12px;
+    border: 2px solid var(--border);
+    padding: 20px;
+    transition: all 0.3s ease;
+    display: flex;
+    flex-direction: column;
+  }
+  .hand-card:hover { box-shadow: var(--shadow-hover); transform: translateY(-2px); }
+  .hand-card.master { border-color: var(--accent-master); }
+  .hand-card.slave { border-color: var(--accent-slave); }
+  .hand-header {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border);
+  }
+  .hand-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; }
+  .hand-card.master .hand-icon { background: #eef2f9; }
+  .hand-card.slave .hand-icon { background: #f0f5f3; }
+  .hand-name { font-size: 16px; font-weight: 700; }
+  .hand-role { font-size: 12px; color: var(--text-secondary); margin-left: auto; padding: 3px 10px; border-radius: 10px; background: var(--bg); }
+
+  .component-list { display: flex; flex-direction: column; gap: 8px; flex: 1; justify-content: center; }
+  .component-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: 8px; background: var(--bg); font-size: 13px;
+  }
+  .component-item .chip {
+    width: 24px; height: 24px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #fff; flex-shrink: 0;
+  }
+  .chip-imu { background: var(--accent-sensor); }
+  .chip-flex { background: var(--accent-edge); }
+  .chip-audio { background: var(--accent-audio); }
+  .chip-mic { background: var(--accent-comm); }
+  .chip-wifi { background: var(--accent-cloud); }
+
+  /* 中间通信列 */
+  .comm-column {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 16px;
+    padding-top: 40px;
+  }
+  .comm-box {
+    background: #fff; border: 2px dashed var(--accent-comm);
+    border-radius: 12px; padding: 14px 18px; text-align: center; width: 100%;
+  }
+  .comm-box .comm-title { font-size: 13px; font-weight: 700; color: var(--accent-comm); margin-bottom: 4px; }
+  .comm-box .comm-detail { font-size: 11px; color: var(--text-secondary); }
+  .comm-arrow {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    font-size: 12px; color: var(--text-secondary);
+  }
+  .comm-arrow svg { display: block; }
+
+  /* ===== 软件五层架构 ===== */
+  .sw-section {
+    background: var(--card-bg);
+    border-radius: 16px;
+    padding: 28px;
+    box-shadow: var(--shadow);
+  }
+  .layer-stack { display: flex; flex-direction: column; gap: 12px; }
+  .layer-row {
+    display: flex; align-items: stretch; border-radius: 12px; overflow: hidden;
+    border: 1px solid var(--border); background: #fff;
+  }
+  .layer-label {
+    width: 160px; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; flex-shrink: 0;
+    padding: 16px 12px; color: #fff; font-weight: 700; font-size: 14px;
+    text-align: center;
+  }
+  .layer-label .layer-num { font-size: 24px; font-weight: 800; opacity: 0.4; margin-bottom: 4px; }
+  .layer-label .layer-desc { font-size: 11px; font-weight: 400; opacity: 0.8; margin-top: 4px; }
+  .layer-content {
+    flex: 1; display: flex; gap: 12px; padding: 16px; align-items: center; flex-wrap: wrap;
+  }
+  .module-box {
+    background: #fff; border-radius: 8px; padding: 10px 14px;
+    font-size: 13px; font-weight: 500;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    border-left: 4px solid transparent;
+    min-width: 100px; text-align: center;
+  }
+  .module-box .module-sub { display: block; font-size: 11px; color: var(--text-secondary); font-weight: 400; margin-top: 3px; }
+
+  .layer-l5 .layer-label { background: var(--accent-master); }
+  .layer-l5 .layer-content { background: #f8fafc; }
+  .layer-l5 .module-box { border-left-color: var(--accent-master); }
+
+  .layer-l4 .layer-label { background: var(--accent-cloud); }
+  .layer-l4 .layer-content { background: #faf5ff; }
+  .layer-l4 .module-box { border-left-color: var(--accent-cloud); }
+
+  .layer-l3 .layer-label { background: var(--accent-comm); }
+  .layer-l3 .layer-content { background: #f0fdff; }
+  .layer-l3 .module-box { border-left-color: var(--accent-comm); }
+
+  .layer-l2 .layer-label { background: var(--accent-edge); }
+  .layer-l2 .layer-content { background: #fffbeb; }
+  .layer-l2 .module-box { border-left-color: var(--accent-edge); }
+
+  .layer-l1 .layer-label { background: var(--text-secondary); }
+  .layer-l1 .layer-content { background: #f8f8fa; }
+  .layer-l1 .module-box { border-left-color: var(--text-secondary); }
+
+  /* 连接箭头 */
+  .layer-connector {
+    display: flex; justify-content: center; padding: 4px 0;
+  }
+  .layer-connector svg { opacity: 0.4; }
+
+  /* 亮点标签 */
+  .highlight-bar {
+    display: flex; gap: 10px; flex-wrap: wrap; margin-top: 24px;
+    padding-top: 20px; border-top: 1px solid var(--border);
+  }
+  .highlight-tag {
+    padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500;
+    background: #fff; border: 1px solid var(--border); color: var(--text-secondary);
+  }
+  .highlight-tag strong { color: var(--accent-master); }
+
+  /* 响应式 */
+  @media (max-width: 900px) {
+    .hw-grid { grid-template-columns: 1fr; }
+    .comm-column { flex-direction: row; padding-top: 0; }
+    .layer-label { width: 100px; font-size: 12px; }
+    .layer-label .layer-num { font-size: 18px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>灵犀手套 LingxiGlove</h1>
+    <p class="subtitle">基于 ESP32-S3 边缘 AI + 云端大模型的智能手语翻译手套 · 系统架构图 v2.0</p>
+    <div class="badges">
+      <span class="badge master"><span class="dot"></span>右手 Master</span>
+      <span class="badge slave"><span class="dot"></span>左手 Slave</span>
+      <span class="badge cloud"><span class="dot"></span>云端 AI</span>
+      <span class="badge edge"><span class="dot"></span>端侧推理</span>
+    </div>
+  </header>
+
+  <!-- 硬件拓扑 -->
+  <section class="hw-section">
+    <div class="section-title"><div class="icon">&#128300;</div>双节点硬件拓扑</div>
+    <div class="hw-grid">
+      <!-- 左手 Slave -->
+      <div class="hand-card slave">
+        <div class="hand-header">
+          <div class="hand-icon">&#9995;</div>
+          <div>
+            <div class="hand-name">左手 Slave</div>
+          </div>
+          <div class="hand-role">ESP-NOW 发送</div>
+        </div>
+        <div class="component-list">
+          <div class="component-item">
+            <div class="chip chip-imu">IMU</div>
+            <div><strong>MPU6050</strong> <span style="color:var(--text-secondary)">6轴姿态传感 · I2C</span></div>
+          </div>
+          <div class="component-item">
+            <div class="chip chip-flex">FLEX</div>
+            <div><strong>弯曲传感器 ×5</strong> <span style="color:var(--text-secondary)">拇指/食指/中指/无名指/小指 · ADC</span></div>
+          </div>
+          <div class="component-item">
+            <div class="chip chip-wifi">WiFi</div>
+            <div><strong>ESP32-S3 WiFi</strong> <span style="color:var(--text-secondary)">ESP-NOW 射频 · 同信道</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 中间通信 -->
+      <div class="comm-column">
+        <div class="comm-box">
+          <div class="comm-title">&#128172; ESP-NOW 无线同步</div>
+          <div class="comm-detail">32 B HandFrame · 20 Hz<br>无 AP 依赖 · 同一 WiFi 信道</div>
+        </div>
+        <div class="comm-arrow">
+          <span>Slave &#8594; Master</span>
+          <svg width="40" height="30" viewBox="0 0 40 30"><path d="M10 15 L28 15 M22 9 L28 15 L22 21" stroke="#0891B2" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <div class="comm-box" style="border-color:var(--accent-cloud); margin-top:12px;">
+          <div class="comm-title" style="color:var(--accent-cloud)">&#9729; 云端链路</div>
+          <div class="comm-detail">WiFi STA · HTTP/WS<br>DashScope Qwen API</div>
+        </div>
+      </div>
+
+      <!-- 右手 Master -->
+      <div class="hand-card master">
+        <div class="hand-header">
+          <div class="hand-icon">&#9995;</div>
+          <div>
+            <div class="hand-name">右手 Master</div>
+          </div>
+          <div class="hand-role">识别 + 云端 + 播报</div>
+        </div>
+        <div class="component-list">
+          <div class="component-item">
+            <div class="chip chip-imu">IMU</div>
+            <div><strong>MPU6050</strong> <span style="color:var(--text-secondary)">6轴姿态传感 · I2C</span></div>
+          </div>
+          <div class="component-item">
+            <div class="chip chip-flex">FLEX</div>
+            <div><strong>弯曲传感器 ×5</strong> <span style="color:var(--text-secondary)">拇指/食指/中指/无名指/小指 · ADC</span></div>
+          </div>
+          <div class="component-item">
+            <div class="chip chip-audio">&#128266;</div>
+            <div><strong>MAX98357A + 喇叭</strong> <span style="color:var(--text-secondary)">I2S 语音播报</span></div>
+          </div>
+          <div class="component-item">
+            <div class="chip chip-mic">MIC</div>
+            <div><strong>INMP441</strong> <span style="color:var(--text-secondary)">I2S 数字麦 · PTT 语音回译</span></div>
+          </div>
+          <div class="component-item">
+            <div class="chip chip-wifi">WiFi</div>
+            <div><strong>ESP32-S3 WiFi</strong> <span style="color:var(--text-secondary)">802.11 b/g/n · 云端 API</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="highlight-bar">
+      <span class="highlight-tag"><strong>单手套 BOM</strong> ≈ ¥250</span>
+      <span class="highlight-tag"><strong>双手协同</strong> ESP-NOW 20Hz 实时同步</span>
+      <span class="highlight-tag"><strong>单一固件</strong> NVS 切换 Master/Slave</span>
+      <span class="highlight-tag"><strong>断网兜底</strong> 离线 PCM 查表播放</span>
+    </div>
+  </section>
+
+  <!-- 软件五层架构 -->
+  <section class="sw-section">
+    <div class="section-title"><div class="icon">&#128187;</div>软件五层架构</div>
+    <div class="layer-stack">
+      <!-- L5 -->
+      <div class="layer-row layer-l5">
+        <div class="layer-label">
+          <div class="layer-num">L5</div>
+          <div>应用主控</div>
+          <div class="layer-desc">GestureApp / 采集 / 校准</div>
+        </div>
+        <div class="layer-content">
+          <div class="module-box">LingxiGlove_Main.ino<span class="module-sub">主循环 · 模式切换</span></div>
+          <div class="module-box">采集模式<span class="module-sub">CSV 数据落盘</span></div>
+          <div class="module-box">串口命令<span class="module-sub">r/c/f/k/h</span></div>
+          <div class="module-box">NVS 持久化<span class="module-sub">校准 / 角色</span></div>
+        </div>
+      </div>
+      <div class="layer-connector"><svg width="24" height="16" viewBox="0 0 24 16"><path d="M12 2 L12 12 M8 8 L12 12 L16 8" stroke="#94a3b8" stroke-width="2" fill="none"/></svg></div>
+
+      <!-- L4 -->
+      <div class="layer-row layer-l4">
+        <div class="layer-label">
+          <div class="layer-num">L4</div>
+          <div>AI 与端云</div>
+          <div class="layer-desc">TinyML + LLM + TTS + ASR</div>
+        </div>
+        <div class="layer-content">
+          <div class="module-box">GestureRecognizer<span class="module-sub">Rule-based / Edge Impulse 1D-CNN</span></div>
+          <div class="module-box">MotionDetector<span class="module-sub">动作/静止门控 · VAD for HAR</span></div>
+          <div class="module-box">LLM Client<span class="module-sub">Qwen-LLM 语义改写</span></div>
+          <div class="module-box">TTS Player<span class="module-sub">Qwen-TTS · LittleFS 缓存</span></div>
+          <div class="module-box">Local TTS Fallback<span class="module-sub">断网 PCM 兜底</span></div>
+          <div class="module-box">Mic Capture<span class="module-sub">INMP441 · I2S1 DMA</span></div>
+        </div>
+      </div>
+      <div class="layer-connector"><svg width="24" height="16" viewBox="0 0 24 16"><path d="M12 2 L12 12 M8 8 L12 12 L16 8" stroke="#94a3b8" stroke-width="2" fill="none"/></svg></div>
+
+      <!-- L3 -->
+      <div class="layer-row layer-l3">
+        <div class="layer-label">
+          <div class="layer-num">L3</div>
+          <div>双手协同</div>
+          <div class="layer-desc">ESP-NOW + 仲裁</div>
+        </div>
+        <div class="layer-content">
+          <div class="module-box">ESP-NOW Sync<span class="module-sub">HandFrame 32B · 协议 v1</span></div>
+          <div class="module-box">GestureArbitrator<span class="module-sub">单手/双手统一决策</span></div>
+          <div class="module-box">BimanualRecognizer<span class="module-sub">双手规则识别</span></div>
+          <div class="module-box">PTT Detector<span class="module-sub">双击触发 · 握拳结束</span></div>
+        </div>
+      </div>
+      <div class="layer-connector"><svg width="24" height="16" viewBox="0 0 24 16"><path d="M12 2 L12 12 M8 8 L12 12 L16 8" stroke="#94a3b8" stroke-width="2" fill="none"/></svg></div>
+
+      <!-- L2 -->
+      <div class="layer-row layer-l2">
+        <div class="layer-label">
+          <div class="layer-num">L2</div>
+          <div>传感器与执行器</div>
+          <div class="layer-desc">采集 · 解算 · 播放</div>
+        </div>
+        <div class="layer-content">
+          <div class="module-box">Sensor Manager<span class="module-sub">MPU6050 + Flex ADC · 姿态解算</span></div>
+          <div class="module-box">Calibration<span class="module-sub">IMU 零偏 · Flex 量程 · NVS</span></div>
+          <div class="module-box">TTS Player I2S<span class="module-sub">MAX98357A · 24kHz</span></div>
+          <div class="module-box">HTTP Client<span class="module-sub">WiFi · JSON</span></div>
+          <div class="module-box">WiFi Manager<span class="module-sub">连接 · 重连 · 状态</span></div>
+        </div>
+      </div>
+      <div class="layer-connector"><svg width="24" height="16" viewBox="0 0 24 16"><path d="M12 2 L12 12 M8 8 L12 12 L16 8" stroke="#94a3b8" stroke-width="2" fill="none"/></svg></div>
+
+      <!-- L1 -->
+      <div class="layer-row layer-l1">
+        <div class="layer-label">
+          <div class="layer-num">L1</div>
+          <div>HAL</div>
+          <div class="layer-desc">Arduino + FreeRTOS</div>
+        </div>
+        <div class="layer-content">
+          <div class="module-box">Arduino Core<span class="module-sub">ESP32-S3 Board pkg</span></div>
+          <div class="module-box">FreeRTOS<span class="module-sub">任务调度</span></div>
+          <div class="module-box">ESP-IDF<span class="module-sub">WiFi / ESP-NOW / I2S / ADC</span></div>
+          <div class="module-box">LittleFS<span class="module-sub">TTS 缓存 / 离线语音</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 前端应用生态 -->
+  <section class="hw-section">
+    <div class="section-title"><div class="icon">&#128187;</div>前端应用生态</div>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+      <div style="background:#fff; border-radius:12px; border:2px solid var(--border); padding:20px; display:flex; flex-direction:column; gap:12px;">
+        <div style="display:flex; align-items:center; gap:10px; padding-bottom:12px; border-bottom:1px solid var(--border);">
+          <div style="width:36px;height:36px;border-radius:8px;background:#eef2f9;display:flex;align-items:center;justify-content:center;font-size:18px;">&#127760;</div>
+          <div>
+            <div style="font-size:16px;font-weight:700;">LingxiGlove_APP</div>
+            <div style="font-size:12px;color:var(--text-secondary);">Next.js + React + WebSocket</div>
+          </div>
+        </div>
+        <div style="font-size:13px;color:var(--text-secondary);line-height:1.7;">
+          <strong style="color:var(--text)">实时对话面板</strong>：手势识别结果（sign）与语音ASR结果（speech）以对话气泡形式展示<br><br>
+          <strong style="color:var(--text)">工程仪表板</strong>：系统健康状态 · 手势Top-3候选 · 麦克风/PTT状态 · 5路弯曲传感器实时数据 · 频谱可视化<br><br>
+          <strong style="color:var(--text)">WebSocket双向通信</strong>：手套遥测数据上行 + 控制指令下行
+        </div>
+      </div>
+      <div style="background:#fff; border-radius:12px; border:2px solid var(--border); padding:20px; display:flex; flex-direction:column; gap:12px;">
+        <div style="display:flex; align-items:center; gap:10px; padding-bottom:12px; border-bottom:1px solid var(--border);">
+          <div style="width:36px;height:36px;border-radius:8px;background:#f0f5f3;display:flex;align-items:center;justify-content:center;font-size:18px;">&#128202;</div>
+          <div>
+            <div style="font-size:16px;font-weight:700;">LingxiGlove_Capture</div>
+            <div style="font-size:12px;color:var(--text-secondary);">Tauri 2.x + Rust + React</div>
+          </div>
+        </div>
+        <div style="font-size:13px;color:var(--text-secondary);line-height:1.7;">
+          <strong style="color:var(--text)">跨平台采集桌面应用</strong>（macOS首发）：取代 capture_serial.py + 手动打标的多步CLI流程<br><br>
+          <strong style="color:var(--text)">双设备并行采集</strong>：左右手两块板子同时接入，时间对齐 + 统一打标<br><br>
+          <strong style="color:var(--text)">端到端闭环</strong>：串口采集 → uPlot 60fps实时可视化 → 打标 → 切窗 → 一键直传 Edge Impulse
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer style="text-align:center; margin-top:40px; padding-top:20px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:12px;">
+    灵犀手套 LingxiGlove · 浙江大学 · 2026 年全国大学生物联网设计竞赛（乐鑫科技命题赛道）<br>
+    架构图 v2.0  ·  生成日期：2026-05-31
+  </footer>
+</div>
+</body>
+</html>

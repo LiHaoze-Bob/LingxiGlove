@@ -2,6 +2,7 @@
 #include "config.h"
 #include "http_client.h"
 #include "llm_client.h"
+#include "ws_server.h"   // 演示模式：i2s_write 同时广播 tts_audio 帧
 #include <driver/i2s.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -683,6 +684,10 @@ bool speak(const char* text, const char* cache_key, bool cache_only) {
         }
 
         // 分块写 I2S，每块 4096 字节对齐 DMA 描述符大小
+        // 演示模式钩子：每块 i2s_write 后同步广播一帧 tts_audio，
+        // base64+JSON+WS broadcastTXT 通常 < 20ms，DMA 缓冲足以掩盖延迟。
+        const bool demo_mode = WsServer_IsDemoMode();
+        uint32_t tts_seq = 0;
         const size_t kI2SChunk = 4096;
         size_t offset = 0;
         while (offset < pcm_len) {
@@ -691,8 +696,24 @@ bool speak(const char* text, const char* cache_key, bool cache_only) {
             size_t bytes_written = 0;
             i2s_write(I2S_NUM_0, pcm_buf + offset, chunk,
                       &bytes_written, portMAX_DELAY);
+            if (demo_mode) {
+                // pcm_buf 是 16-bit LE，chunk 字节数对齐 2
+                WsServer_BroadcastTtsAudio(
+                    reinterpret_cast<const int16_t*>(pcm_buf + offset),
+                    chunk / sizeof(int16_t),
+                    tts_seq,
+                    /*final=*/false,
+                    tts_seq == 0 ? text : nullptr,  // 仅首帧带原文
+                    QWEN_TTS_SAMPLE_RATE);
+                tts_seq++;
+            }
             total_written += bytes_written;
             offset += chunk;
+        }
+        // 演示模式收尾帧：通知 APP 释放 AudioContext 队列
+        if (demo_mode) {
+            WsServer_BroadcastTtsAudio(nullptr, 0, tts_seq, /*final=*/true,
+                                       nullptr, QWEN_TTS_SAMPLE_RATE);
         }
         got_any_audio = true;
         DEBUG_LOG("[TTS] I2S 写入完成, %u bytes (含 100ms 预热)", (uint32_t)total_written);
@@ -737,7 +758,8 @@ bool speak(const char* text, const char* cache_key, bool cache_only) {
     return got_any_audio;
 }
 
-bool PlayPcmInt16(const int16_t* pcm, size_t sample_count, uint32_t sample_rate) {
+bool PlayPcmInt16(const int16_t* pcm, size_t sample_count, uint32_t sample_rate,
+                  const char* label) {
     if (!s_i2sInitialized) {
         DEBUG_PRINTLN("[TTS] PlayPcmInt16: I2S 未初始化");
         return false;
@@ -782,6 +804,8 @@ bool PlayPcmInt16(const int16_t* pcm, size_t sample_count, uint32_t sample_rate)
     // PlayPcmInt16 接受 const int16_t*（通常来自 Flash 只读段），不能原地修改。
     // 软件增益需要可写缓冲：把 chunk 拷贝到栈上临时缓冲再 ApplyGain，
     // 512 样本 × 2 字节 = 1024 字节，在 8 KB loopTask 栈上安全。
+    const bool demo_mode = WsServer_IsDemoMode();
+    uint32_t tts_seq = 0;
     const size_t kChunkSamples = 512;
     int16_t gain_buf[kChunkSamples];
     size_t written_samples = 0;
@@ -804,11 +828,24 @@ bool PlayPcmInt16(const int16_t* pcm, size_t sample_count, uint32_t sample_rate)
             i2s_stop(I2S_NUM_0);
             return false;
         }
+        // 演示模式钩子：与本地 I2S 同步广播 tts_audio
+        if (demo_mode) {
+            WsServer_BroadcastTtsAudio(
+                gain_buf, chunk, tts_seq, /*final=*/false,
+                tts_seq == 0 ? label : nullptr,
+                sample_rate);
+            tts_seq++;
+        }
         written_samples += bytes_written / sizeof(int16_t);
         // 让出给看门狗
         if (written_samples % (kChunkSamples * 4) == 0) {
             delay(1);
         }
+    }
+    // 演示模式收尾帧
+    if (demo_mode) {
+        WsServer_BroadcastTtsAudio(nullptr, 0, tts_seq, /*final=*/true,
+                                   nullptr, sample_rate);
     }
 
     // 等 DMA 排空，然后停止 I2S 让 MAX98357A 自动静音

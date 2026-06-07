@@ -136,4 +136,16 @@ bool RunFlexStageCalibration(uint16_t out_values[FLEX_CHANNEL_COUNT],
  */
 void PrintCalibration(const CalibrationData& cal);
 
+/**
+ * @brief 把 CalibrationData 以"机器可读紧凑单行"格式打印到 Serial，供上位机
+ *        （LingxiCapture）解析。格式：
+ *
+ *   [CAL_INFO] flags=<u16> ax=<f> ay=<f> az=<f> gx=<f> gy=<f> gz=<f>
+ *              fmin=<u>,<u>,<u>,<u>,<u> fmax=<u>,<u>,<u>,<u>,<u>
+ *
+ * 即便 flags=0（未校准），所有字段也会以 0/默认值出现，保证上位机解析器始终能拿到完整列。
+ * 启用 ENABLE_FLEX_SENSORS=0 时省略 fmin/fmax 两列。
+ */
+void PrintCalibrationMachineReadable(const CalibrationData& cal);
+
 #endif  // CALIBRATION_H

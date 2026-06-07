@@ -24,14 +24,10 @@ static float s_gyro_bias_y  = 0.0f;
 static float s_gyro_bias_z  = 0.0f;
 
 #if ENABLE_FLEX_SENSORS
-// 5 路弯曲传感器 ADC 引脚映射（与 FlexFinger 枚举严格对应，顺序不可变）
-static const uint8_t kFlexAdcPins[FLEX_CHANNEL_COUNT] = {
-    FLEX_PIN_THUMB,
-    FLEX_PIN_INDEX,
-    FLEX_PIN_MIDDLE,
-    FLEX_PIN_RING,
-    FLEX_PIN_PINKY
-};
+// 5 路弯曲传感器 ADC 引脚映射（与 FlexFinger 枚举严格对应，顺序不可变）。
+// 默认使用 MASTER（右手）映射；setFlexPinMapping(g_runtime_role) 在 setup() 中
+// 根据 NVS 角色覆写为 SLAVE 映射。两只手套烧同一固件，运行期切换。
+static uint8_t s_flex_pins[FLEX_CHANNEL_COUNT] = FLEX_PINS_MASTER;
 
 // 运行时归一化量程：默认使用 config.h 的 FLEX_ADC_MIN/MAX，
 // 由 setFlexRuntimeRange() 在校准加载后覆写。
@@ -70,6 +66,23 @@ void setFlexRuntimeRange(uint8_t channel, uint16_t min_val, uint16_t max_val) {
 #endif
 }
 
+void setFlexPinMapping(uint8_t role) {
+#if ENABLE_FLEX_SENSORS
+    if (role == 0) {
+        // MASTER = 右手
+        const uint8_t master_pins[FLEX_CHANNEL_COUNT] = FLEX_PINS_MASTER;
+        memcpy(s_flex_pins, master_pins, sizeof(master_pins));
+    } else if (role == 1) {
+        // SLAVE = 左手
+        const uint8_t slave_pins[FLEX_CHANNEL_COUNT] = FLEX_PINS_SLAVE;
+        memcpy(s_flex_pins, slave_pins, sizeof(slave_pins));
+    }
+    // 其它非 0/1 值忽略，保持当前映射不变
+#else
+    (void)role;
+#endif
+}
+
 // ---------------------------------------------------------
 // 内部函数：读取 5 路弯曲传感器
 // ENABLE_FLEX_SENSORS=1: 对每路做 FLEX_ADC_OVERSAMPLE 次过采样取均值，
@@ -82,7 +95,7 @@ static void readFlexSensors(SensorData& data) {
         // 多次采样平均，降低白噪声
         uint32_t acc = 0;
         for (uint8_t i = 0; i < FLEX_ADC_OVERSAMPLE; i++) {
-            acc += analogRead(kFlexAdcPins[ch]);
+            acc += analogRead(s_flex_pins[ch]);
         }
         uint16_t raw = (uint16_t)(acc / FLEX_ADC_OVERSAMPLE);
         data.flex[ch] = raw;
@@ -182,7 +195,7 @@ bool initSensors() {
     // 配置 ADC 分辨率为 12-bit（ESP32-S3 原生支持），默认衰减已足够覆盖 0~3.3V
     analogReadResolution(12);
     for (uint8_t ch = 0; ch < FLEX_CHANNEL_COUNT; ch++) {
-        pinMode(kFlexAdcPins[ch], INPUT);
+        pinMode(s_flex_pins[ch], INPUT);
     }
     DEBUG_PRINTLN("[Sensor] 弯曲传感器 ADC 通道已初始化 (5 路)");
 #else
@@ -279,9 +292,15 @@ void printSensorData(const SensorData& data) {
               (double)data.gyroX,  (double)data.gyroY,  (double)data.gyroZ,
               (double)data.pitch,  (double)data.roll);
     if (data.flexValid) {
-        // Flex 通道数量固定，逐通道打印便于调试（每通道单独一条日志）
+        // Flex 逐通道打印：裸 ADC + 归一化值，便于硬件验证
+        static const char* s_flexNames[FLEX_CHANNEL_COUNT] = {
+            "Thumb", "Index", "Middle", "Ring", "Pinky"
+        };
         for (uint8_t ch = 0; ch < FLEX_CHANNEL_COUNT; ch++) {
-            DEBUG_LOG("  Flex[%d]: %.2f", (int)ch, (double)data.flexNorm[ch]);
+            DEBUG_LOG("  Flex[%d %s]: raw=%u norm=%.2f",
+                      (int)ch, s_flexNames[ch],
+                      (unsigned)data.flex[ch],
+                      (double)data.flexNorm[ch]);
         }
     }
 }
